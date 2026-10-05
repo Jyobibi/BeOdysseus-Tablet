@@ -24,20 +24,21 @@ import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.ceil
 
 class MainActivity :
     AppCompatActivity() {
 
     companion object {
+
         private const val TAG =
             "BeOdysseusPose"
 
-        /*
-         * 모델 추론 시간이 약 200ms대이므로
-         * 지나친 중복 호출 방지.
-         */
         private const val INFERENCE_INTERVAL_MS =
             250L
+
+        private const val TURNING_DURATION_MS =
+            3000L
     }
 
     private lateinit var previewView:
@@ -79,6 +80,19 @@ class MainActivity :
     private var lastInferenceTime =
         0L
 
+    private var measurementPhase =
+        MeasurementPhase.WAITING_FRONT
+
+    private var turningStartTime =
+        0L
+
+    /*
+     * SIDE_MEASURING 진입 후
+     * 측면 프로필 재등록이 아직 안 됐는지 표시.
+     */
+    private var sideProfileRefreshPending =
+        false
+
     private val requestCameraPermission =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -88,7 +102,9 @@ class MainActivity :
             if (
                 granted
             ) {
+
                 startCamera()
+
             } else {
 
                 Toast.makeText(
@@ -150,9 +166,6 @@ class MainActivity :
                 R.id.retryUserButton
             )
 
-        /*
-         * Overlay 좌표 계산과 동일하게 맞춤.
-         */
         previewView.scaleType =
             PreviewView.ScaleType.FILL_CENTER
 
@@ -196,6 +209,10 @@ class MainActivity :
         }
     }
 
+    // ============================================================
+    // Retry
+    // ============================================================
+
     private fun setupRetryButton() {
 
         retryUserButton.setOnClickListener {
@@ -210,6 +227,15 @@ class MainActivity :
             retryUserButton.visibility =
                 View.GONE
 
+            measurementPhase =
+                MeasurementPhase.WAITING_FRONT
+
+            turningStartTime =
+                0L
+
+            sideProfileRefreshPending =
+                false
+
             cameraExecutor.execute {
 
                 poseTracker.restart()
@@ -218,6 +244,10 @@ class MainActivity :
             }
         }
     }
+
+    // ============================================================
+    // Camera
+    // ============================================================
 
     private fun startCamera() {
 
@@ -269,6 +299,7 @@ class MainActivity :
                         lastInferenceTime <
                         INFERENCE_INTERVAL_MS
                     ) {
+
                         return@setAnalyzer
                     }
 
@@ -301,6 +332,7 @@ class MainActivity :
                             rotatedBitmap !==
                             originalBitmap
                         ) {
+
                             originalBitmap.recycle()
                         }
 
@@ -355,35 +387,76 @@ class MainActivity :
         )
     }
 
+    // ============================================================
+    // Pose Pipeline
+    // ============================================================
+
     private fun processPoseFrame(
         bitmap: Bitmap
     ) {
 
-        /*
-         * 1. YOLO26n-Pose
-         *
-         * 화면에 존재하는 모든 사람 검출
-         */
+        // 1. YOLO26n-Pose
         val detections =
             poseModelLoader.runInference(
                 bitmap
             )
 
-        /*
-         * 2. USER 01 선정/추적
-         */
+        // 2. 기존 USER 01 Tracker
         val trackerUpdate =
             poseTracker.update(
                 detections,
                 bitmap
             )
 
+        // 3. 측정 단계 관리
+        updateMeasurementPhase(
+            trackerUpdate.state
+        )
+
         /*
-         * 추적이 완전히 끊긴 상태에서는
-         * 이전 smoothing 값 제거.
+         * 측면 측정 단계 진입 후
+         * USER 01이 안정적으로 잡힌 첫 프레임에서
+         * 현재 측면 모습을 새로운 추적 프로필로 저장.
          */
         if (
-            trackerUpdate.detection == null &&
+            measurementPhase ==
+            MeasurementPhase.SIDE_MEASURING &&
+            sideProfileRefreshPending &&
+            trackerUpdate.state ==
+            TrackingState.LOCKED &&
+            trackerUpdate.detection !=
+            null
+        ) {
+
+            val refreshed =
+                poseTracker.refreshSideProfile(
+                    trackerUpdate.detection,
+                    bitmap
+                )
+
+            if (
+                refreshed
+            ) {
+
+                sideProfileRefreshPending =
+                    false
+
+                poseSmoother.reset()
+
+                Log.d(
+                    TAG,
+                    "SIDE PROFILE REFRESH COMPLETE"
+                )
+            }
+        }
+
+        /*
+         * 추적이 완전히 끊긴 경우
+         * 이전 Skeleton 좌표 제거.
+         */
+        if (
+            trackerUpdate.detection ==
+            null &&
             (
                     trackerUpdate.state ==
                             TrackingState.SEARCHING ||
@@ -397,9 +470,7 @@ class MainActivity :
             poseSmoother.reset()
         }
 
-        /*
-         * 3. USER 01 Skeleton smoothing
-         */
+        // 4. Skeleton smoothing
         val smoothedDetection =
             trackerUpdate.detection?.let {
 
@@ -409,16 +480,32 @@ class MainActivity :
             }
 
         /*
-         * 4. 자세 지표 계산
+         * 5. 자세 지표
+         *
+         * SIDE_MEASURING일 때만 계산.
+         *
+         * PoseMetrics는 아직 기존 버전 유지.
          */
         val trackedPose =
             smoothedDetection?.let {
                     detection ->
 
                 val metrics =
-                    poseMetrics.calculate(
-                        detection
-                    )
+                    if (
+                        measurementPhase ==
+                        MeasurementPhase.SIDE_MEASURING &&
+                        trackerUpdate.state ==
+                        TrackingState.LOCKED
+                    ) {
+
+                        poseMetrics.calculate(
+                            detection
+                        )
+
+                    } else {
+
+                        PoseMetricsResult()
+                    }
 
                 TrackedPose(
                     boundingBox =
@@ -449,11 +536,18 @@ class MainActivity :
 
         val frameResult =
             PoseFrameResult(
+
                 state =
                     trackerUpdate.state,
 
                 remainingSeconds =
                     trackerUpdate.remainingSeconds,
+
+                measurementPhase =
+                    measurementPhase,
+
+                measurementRemainingSeconds =
+                    getTurningRemainingSeconds(),
 
                 pose =
                     trackedPose,
@@ -477,6 +571,121 @@ class MainActivity :
         }
     }
 
+    // ============================================================
+    // Measurement Phase
+    // ============================================================
+
+    private fun updateMeasurementPhase(
+        trackingState: TrackingState
+    ) {
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        when (
+            measurementPhase
+        ) {
+
+            MeasurementPhase.WAITING_FRONT -> {
+
+                /*
+                 * 기존 USER 01 정면 등록 완료.
+                 */
+                if (
+                    trackingState ==
+                    TrackingState.LOCKED
+                ) {
+
+                    measurementPhase =
+                        MeasurementPhase.TURNING
+
+                    turningStartTime =
+                        now
+
+                    /*
+                     * 회전하면서 정면 프로필과
+                     * 차이가 커질 것을 고려해
+                     * Tracker를 측면 전환 모드로 변경.
+                     */
+                    poseTracker.beginSideTransitionMode()
+
+                    Log.d(
+                        TAG,
+                        "MEASUREMENT: TURNING START"
+                    )
+                }
+            }
+
+            MeasurementPhase.TURNING -> {
+
+                if (
+                    now -
+                    turningStartTime >=
+                    TURNING_DURATION_MS
+                ) {
+
+                    measurementPhase =
+                        MeasurementPhase.SIDE_MEASURING
+
+                    /*
+                     * 다음 안정적인 LOCKED 프레임에서
+                     * 측면 프로필을 저장.
+                     */
+                    sideProfileRefreshPending =
+                        true
+
+                    poseSmoother.reset()
+
+                    Log.d(
+                        TAG,
+                        "MEASUREMENT: SIDE MEASURING START"
+                    )
+                }
+            }
+
+            MeasurementPhase.SIDE_MEASURING -> {
+                // 계속 실시간 측정
+            }
+        }
+    }
+
+    private fun getTurningRemainingSeconds():
+            Int {
+
+        if (
+            measurementPhase !=
+            MeasurementPhase.TURNING
+        ) {
+            return 0
+        }
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        val remaining =
+            TURNING_DURATION_MS -
+                    (
+                            now -
+                                    turningStartTime
+                            )
+
+        if (
+            remaining <=
+            0
+        ) {
+            return 0
+        }
+
+        return ceil(
+            remaining /
+                    1000.0
+        ).toInt()
+    }
+
+    // ============================================================
+    // UI
+    // ============================================================
+
     private fun updateUI(
         result: PoseFrameResult
     ) {
@@ -490,49 +699,53 @@ class MainActivity :
                 userStatusText.text =
                     "사용자를 화면 중앙에 위치해주세요."
 
+                clearMetricUI()
+
                 retryUserButton.visibility =
                     View.GONE
+
+                return
             }
 
             TrackingState.REGISTERING -> {
 
                 userStatusText.text =
-                    "사용자 인식 중... ${result.remainingSeconds}"
+                    "정면을 바라봐 주세요. 사용자 인식 중... ${result.remainingSeconds}"
+
+                clearMetricUI()
 
                 retryUserButton.visibility =
                     View.GONE
-            }
 
-            TrackingState.LOCKED -> {
-
-                if (
-                    result.pose != null
-                ) {
-
-                    userStatusText.text =
-                        "USER 01 · LOCKED"
-
-                } else {
-
-                    userStatusText.text =
-                        "사용자 추적 중..."
-                }
-
-                /*
-                 * 잘못 잠겼을 경우를 위한
-                 * fallback 재인식.
-                 */
-                retryUserButton.visibility =
-                    View.VISIBLE
+                return
             }
 
             TrackingState.RECOVERING -> {
 
-                userStatusText.text =
-                    "사용자 다시 찾는 중..."
+                /*
+                 * 측면 측정 중 잠깐 관절을 놓친 경우에는
+                 * 다시 USER 등록하는 것처럼 보이지 않도록 표시.
+                 */
+                if (
+                    result.measurementPhase ==
+                    MeasurementPhase.SIDE_MEASURING
+                ) {
+
+                    userStatusText.text =
+                        "측면 자세를 유지해주세요."
+
+                } else {
+
+                    userStatusText.text =
+                        "USER 01 다시 찾는 중..."
+                }
+
+                clearMetricUI()
 
                 retryUserButton.visibility =
                     View.GONE
+
+                return
             }
 
             TrackingState.LOST -> {
@@ -540,22 +753,76 @@ class MainActivity :
                 userStatusText.text =
                     "사용자를 찾을 수 없습니다."
 
+                clearMetricUI()
+
                 retryUserButton.visibility =
                     View.VISIBLE
+
+                return
+            }
+
+            TrackingState.LOCKED -> {
+                // MeasurementPhase에서 처리
             }
         }
 
-        updateMetricUI(
-            result.pose
-        )
+        when (
+            result.measurementPhase
+        ) {
+
+            MeasurementPhase.WAITING_FRONT -> {
+
+                userStatusText.text =
+                    "USER 01 · LOCKED"
+
+                clearMetricUI()
+            }
+
+            MeasurementPhase.TURNING -> {
+
+                userStatusText.text =
+                    "측면으로 돌아서 양궁 자세를 취해주세요. ${result.measurementRemainingSeconds}"
+
+                clearMetricUI()
+            }
+
+            MeasurementPhase.SIDE_MEASURING -> {
+
+                if (
+                    result.pose !=
+                    null
+                ) {
+
+                    userStatusText.text =
+                        "측면 자세 측정 중"
+
+                } else {
+
+                    userStatusText.text =
+                        "측면 자세를 유지해주세요."
+                }
+
+                updateMetricUI(
+                    result.pose
+                )
+            }
+        }
+
+        retryUserButton.visibility =
+            View.VISIBLE
     }
+
+    // ============================================================
+    // Metric UI
+    // ============================================================
 
     private fun updateMetricUI(
         pose: TrackedPose?
     ) {
 
         if (
-            pose == null
+            pose ==
+            null
         ) {
 
             clearMetricUI()
@@ -574,7 +841,8 @@ class MainActivity :
 
         shoulderTiltText.text =
             if (
-                shoulder != null
+                shoulder !=
+                null
             ) {
 
                 String.format(
@@ -590,7 +858,8 @@ class MainActivity :
 
         bodyLeanText.text =
             if (
-                body != null
+                body !=
+                null
             ) {
 
                 String.format(
@@ -606,7 +875,8 @@ class MainActivity :
 
         armAlignmentText.text =
             if (
-                arm != null
+                arm !=
+                null
             ) {
 
                 String.format(
@@ -633,13 +903,18 @@ class MainActivity :
             "팔 정렬: --"
     }
 
+    // ============================================================
+    // Bitmap
+    // ============================================================
+
     private fun rotateBitmap(
         bitmap: Bitmap,
         rotationDegrees: Int
     ): Bitmap {
 
         if (
-            rotationDegrees == 0
+            rotationDegrees ==
+            0
         ) {
             return bitmap
         }

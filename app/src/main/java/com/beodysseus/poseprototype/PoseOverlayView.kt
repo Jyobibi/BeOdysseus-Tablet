@@ -20,6 +20,7 @@ class PoseOverlayView @JvmOverloads constructor(
 ) {
 
     companion object {
+
         private const val KEYPOINT_CONFIDENCE =
             0.40f
     }
@@ -27,6 +28,10 @@ class PoseOverlayView @JvmOverloads constructor(
     private var frameResult:
             PoseFrameResult? = null
 
+    /*
+     * 전면카메라 Preview는
+     * 거울처럼 표시되므로 true.
+     */
     private var mirrorX =
         true
 
@@ -34,6 +39,7 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
+
             color =
                 Color.rgb(
                     50,
@@ -55,6 +61,7 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
+
             color =
                 Color.WHITE
 
@@ -66,6 +73,7 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
+
             color =
                 Color.rgb(
                     50,
@@ -84,6 +92,7 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
+
             color =
                 Color.rgb(
                     255,
@@ -102,6 +111,7 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
+
             color =
                 Color.argb(
                     215,
@@ -118,18 +128,26 @@ class PoseOverlayView @JvmOverloads constructor(
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
-            color = Color.WHITE
-            textSize = dp(16f)
-            isFakeBoldText = true
+
+            color =
+                Color.WHITE
+
+            textSize =
+                dp(16f)
+
+            isFakeBoldText =
+                true
         }
 
     /*
-     * COCO 17 keypoints
+     * COCO 17 Keypoints 연결.
      */
     private val skeletonEdges =
         arrayOf(
+
             intArrayOf(0, 1),
             intArrayOf(0, 2),
+
             intArrayOf(1, 3),
             intArrayOf(2, 4),
 
@@ -156,6 +174,7 @@ class PoseOverlayView @JvmOverloads constructor(
     fun setMirrorX(
         enabled: Boolean
     ) {
+
         mirrorX =
             enabled
 
@@ -203,7 +222,7 @@ class PoseOverlayView @JvmOverloads constructor(
             return
         }
 
-        val paint =
+        val selectedBoxPaint =
             if (
                 frame.state ==
                 TrackingState.REGISTERING
@@ -220,7 +239,7 @@ class PoseOverlayView @JvmOverloads constructor(
             canvas,
             frame,
             pose,
-            paint
+            selectedBoxPaint
         )
 
         drawSkeleton(
@@ -235,6 +254,10 @@ class PoseOverlayView @JvmOverloads constructor(
             pose
         )
     }
+
+    // ============================================================
+    // Bounding Box
+    // ============================================================
 
     private fun drawBoundingBox(
         canvas: Canvas,
@@ -304,6 +327,10 @@ class PoseOverlayView @JvmOverloads constructor(
             paint
         )
     }
+
+    // ============================================================
+    // Skeleton
+    // ============================================================
 
     private fun drawSkeleton(
         canvas: Canvas,
@@ -398,6 +425,10 @@ class PoseOverlayView @JvmOverloads constructor(
         }
     }
 
+    // ============================================================
+    // Label
+    // ============================================================
+
     private fun drawLabel(
         canvas: Canvas,
         frame: PoseFrameResult,
@@ -409,14 +440,31 @@ class PoseOverlayView @JvmOverloads constructor(
                 frame.state
             ) {
 
-                TrackingState.REGISTERING ->
+                TrackingState.REGISTERING -> {
+
                     "USER DETECTED · ${frame.remainingSeconds}s"
+                }
 
-                TrackingState.LOCKED ->
-                    "USER 01 · LOCKED"
+                TrackingState.LOCKED -> {
 
-                else ->
+                    when (
+                        frame.measurementPhase
+                    ) {
+
+                        MeasurementPhase.WAITING_FRONT ->
+                            "USER 01 · LOCKED"
+
+                        MeasurementPhase.TURNING ->
+                            "USER 01 · TURN SIDE"
+
+                        MeasurementPhase.SIDE_MEASURING ->
+                            "USER 01 · MEASURING"
+                    }
+                }
+
+                else -> {
                     return
+                }
             }
 
         val box =
@@ -477,6 +525,7 @@ class PoseOverlayView @JvmOverloads constructor(
         val background =
             RectF(
                 labelLeft,
+
                 labelBottom -
                         labelHeight,
 
@@ -496,6 +545,7 @@ class PoseOverlayView @JvmOverloads constructor(
 
         canvas.drawText(
             text,
+
             labelLeft +
                     padding,
 
@@ -506,13 +556,10 @@ class PoseOverlayView @JvmOverloads constructor(
         )
     }
 
-    /*
-     * PreviewView.ScaleType.FILL_CENTER와 동일한 방식으로
-     * Analysis 이미지 좌표를 화면 좌표로 변환.
-     *
-     * 전면카메라 Preview는 좌우 반전되므로
-     * mirrorX 적용.
-     */
+    // ============================================================
+    // Preview Coordinate Mapping
+    // ============================================================
+
     private fun mapPoint(
         normalizedX: Float,
         normalizedY: Float,
@@ -528,8 +575,10 @@ class PoseOverlayView @JvmOverloads constructor(
         if (
             mirrorX
         ) {
+
             x =
-                1f - x
+                1f -
+                        x
         }
 
         val sourceWidth =
@@ -565,13 +614,15 @@ class PoseOverlayView @JvmOverloads constructor(
             (
                     viewWidth -
                             renderedWidth
-                    ) / 2f
+                    ) /
+                    2f
 
         val offsetY =
             (
                     viewHeight -
                             renderedHeight
-                    ) / 2f
+                    ) /
+                    2f
 
         return PointF(
             x *

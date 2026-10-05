@@ -15,11 +15,11 @@ private data class CandidateMatch(
 )
 
 class PoseTracker(
-    private val appearanceExtractor:
-    AppearanceExtractor
+    private val appearanceExtractor: AppearanceExtractor
 ) {
 
     companion object {
+
         private const val TAG =
             "BeOdysseusTracker"
 
@@ -29,8 +29,13 @@ class PoseTracker(
         private const val REGISTER_LOST_RESET_MS =
             1000L
 
+        // 정면 추적
         private const val TRACKING_MISS_LIMIT =
             3
+
+        // 측면에서는 관절이 가려질 수 있으므로 조금 더 여유
+        private const val SIDE_TRACKING_MISS_LIMIT =
+            5
 
         private const val RECOVERY_TIMEOUT_MS =
             4000L
@@ -38,32 +43,55 @@ class PoseTracker(
         private const val RECOVERY_REQUIRED_FRAMES =
             3
 
+        private const val SIDE_RECOVERY_REQUIRED_FRAMES =
+            2
+
         private const val KEYPOINT_CONFIDENCE =
             0.50f
 
+        // 정면 등록
         private const val REGISTER_APPEARANCE_MIN =
             0.45f
-
-        private const val LOCKED_APPEARANCE_MIN =
-            0.58f
-
-        private const val RECOVERY_APPEARANCE_MIN =
-            0.68f
 
         private const val REGISTER_MAX_SCORE =
             0.55f
 
+        // 정면 LOCK
+        private const val LOCKED_APPEARANCE_MIN =
+            0.58f
+
         private const val LOCKED_MAX_SCORE =
             0.44f
 
+        // 측면 LOCK
+        private const val SIDE_LOCKED_APPEARANCE_MIN =
+            0.42f
+
+        private const val SIDE_LOCKED_MAX_SCORE =
+            0.56f
+
+        // 정면 복구
+        private const val RECOVERY_APPEARANCE_MIN =
+            0.68f
+
         private const val RECOVERY_MAX_SCORE =
             0.34f
+
+        // 측면 복구
+        private const val SIDE_RECOVERY_APPEARANCE_MIN =
+            0.45f
+
+        private const val SIDE_RECOVERY_MAX_SCORE =
+            0.48f
     }
 
     private var state =
         TrackingState.SEARCHING
 
+    // ============================================================
     // 최초 등록
+    // ============================================================
+
     private var registrationStartTime =
         0L
 
@@ -76,7 +104,10 @@ class PoseTracker(
     private var registrationAppearance:
             AppearanceDescriptor? = null
 
-    // LOCK 상태
+    // ============================================================
+    // LOCK 사용자
+    // ============================================================
+
     private var lockedAppearance:
             AppearanceDescriptor? = null
 
@@ -95,7 +126,10 @@ class PoseTracker(
     private var trackingMissCount =
         0
 
-    // RECOVERING
+    // ============================================================
+    // Recovery
+    // ============================================================
+
     private var recoveryStartTime =
         0L
 
@@ -104,6 +138,24 @@ class PoseTracker(
 
     private var recoveryCandidateAppearance:
             AppearanceDescriptor? = null
+
+    // ============================================================
+    // 정면 / 측면 Tracking Mode
+    // ============================================================
+
+    /*
+     * false:
+     * 정면 USER 등록/추적
+     *
+     * true:
+     * 정면 → 측면 전환 및 측면 측정
+     */
+    private var sidePoseMode =
+        false
+
+    // ============================================================
+    // 외부 호출
+    // ============================================================
 
     fun restart() {
 
@@ -149,10 +201,98 @@ class PoseTracker(
         recoveryCandidateAppearance =
             null
 
+        sidePoseMode =
+            false
+
         Log.d(
             TAG,
             "TRACKER RESET"
         )
+    }
+
+    /*
+     * 정면 등록이 끝나고
+     * 사용자가 측면으로 돌아가기 시작할 때 호출.
+     *
+     * 기존 USER 01은 유지하되
+     * 추적 기준만 측면 전환에 맞게 조금 느슨하게 한다.
+     */
+    fun beginSideTransitionMode() {
+
+        sidePoseMode =
+            true
+
+        trackingMissCount =
+            0
+
+        recoveryMatchCount =
+            0
+
+        recoveryCandidateAppearance =
+            null
+
+        Log.d(
+            TAG,
+            "SIDE TRANSITION MODE ENABLED"
+        )
+    }
+
+    /*
+     * 측면 자세가 완성된 뒤
+     * 현재 측면 모습을 USER 01의 새로운 추적 기준으로 사용.
+     */
+    fun refreshSideProfile(
+        detection: RawPersonDetection,
+        bitmap: Bitmap
+    ): Boolean {
+
+        val appearance =
+            appearanceExtractor.extract(
+                bitmap,
+                detection
+            ) ?: return false
+
+        sidePoseMode =
+            true
+
+        state =
+            TrackingState.LOCKED
+
+        lockedAppearance =
+            appearance
+
+        trackedBox =
+            detection.boundingBox
+
+        trackedBodyRatio =
+            bodyRatio(
+                detection
+            )
+
+        velocityX =
+            0f
+
+        velocityY =
+            0f
+
+        trackingMissCount =
+            0
+
+        recoveryStartTime =
+            0L
+
+        recoveryMatchCount =
+            0
+
+        recoveryCandidateAppearance =
+            null
+
+        Log.d(
+            TAG,
+            "SIDE PROFILE REFRESHED"
+        )
+
+        return true
     }
 
     fun update(
@@ -205,13 +345,15 @@ class PoseTracker(
         bitmap: Bitmap
     ): TrackerUpdate {
 
-        val match = selectInitialCandidate(
-            detections,
-            bitmap
-        ) ?: return TrackerUpdate(
-            state =
-                TrackingState.SEARCHING
-        )
+        val match =
+            selectInitialCandidate(
+                detections,
+                bitmap
+            )
+                ?: return TrackerUpdate(
+                    state =
+                        TrackingState.SEARCHING
+                )
 
         val now =
             SystemClock.elapsedRealtime()
@@ -378,10 +520,12 @@ class PoseTracker(
                 detection.boundingBox
 
             val dx =
-                box.centerX - 0.5f
+                box.centerX -
+                        0.5f
 
             val dy =
-                box.centerY - 0.5f
+                box.centerY -
+                        0.5f
 
             val centerDistance =
                 sqrt(
@@ -401,27 +545,31 @@ class PoseTracker(
             val score =
                 centerDistance *
                         0.60f +
-                        (1f -
-                                detection.personConfidence) *
+                        (
+                                1f -
+                                        detection.personConfidence
+                                ) *
                         0.15f -
                         area *
                         0.25f
 
             if (
                 best == null ||
-                score < best.score
+                score <
+                best.score
             ) {
 
-                best = CandidateMatch(
-                    detection =
-                        detection,
+                best =
+                    CandidateMatch(
+                        detection =
+                            detection,
 
-                    appearance =
-                        appearance,
+                        appearance =
+                            appearance,
 
-                    score =
-                        score
-                )
+                        score =
+                            score
+                    )
             }
         }
 
@@ -460,10 +608,12 @@ class PoseTracker(
 
             val appearanceSimilarity =
                 registrationAppearance?.let {
+
                     appearanceExtractor.similarity(
                         it,
                         appearance
                     )
+
                 } ?: 1f
 
             if (
@@ -490,8 +640,10 @@ class PoseTracker(
                         0.45f +
                         sizeDifference *
                         0.20f +
-                        (1f -
-                                appearanceSimilarity) *
+                        (
+                                1f -
+                                        appearanceSimilarity
+                                ) *
                         0.35f
 
             if (
@@ -503,19 +655,21 @@ class PoseTracker(
 
             if (
                 best == null ||
-                score < best.score
+                score <
+                best.score
             ) {
 
-                best = CandidateMatch(
-                    detection =
-                        detection,
+                best =
+                    CandidateMatch(
+                        detection =
+                            detection,
 
-                    appearance =
-                        appearance,
+                        appearance =
+                            appearance,
 
-                    score =
-                        score
-                )
+                        score =
+                            score
+                    )
             }
         }
 
@@ -569,7 +723,7 @@ class PoseTracker(
     }
 
     // ============================================================
-    // LOCKED
+    // LOCK
     // ============================================================
 
     private fun lockTarget(
@@ -627,9 +781,18 @@ class PoseTracker(
 
             trackingMissCount++
 
+            val missLimit =
+                if (
+                    sidePoseMode
+                ) {
+                    SIDE_TRACKING_MISS_LIMIT
+                } else {
+                    TRACKING_MISS_LIMIT
+                }
+
             if (
                 trackingMissCount >=
-                TRACKING_MISS_LIMIT
+                missLimit
             ) {
 
                 state =
@@ -668,6 +831,23 @@ class PoseTracker(
             match.detection
         )
 
+        /*
+         * 정면 → 측면으로 회전하는 동안
+         * 옷의 보이는 영역도 변하므로
+         * Appearance를 천천히 현재 모습에 적응시킨다.
+         */
+        if (
+            sidePoseMode
+        ) {
+
+            lockedAppearance =
+                appearanceExtractor.blend(
+                    lockedAppearance,
+                    match.appearance,
+                    0.10f
+                )
+        }
+
         return TrackerUpdate(
             state =
                 TrackingState.LOCKED,
@@ -705,10 +885,24 @@ class PoseTracker(
         detection in detections
         ) {
 
+            val trackable =
+                if (
+                    sidePoseMode
+                ) {
+
+                    isSideTrackable(
+                        detection
+                    )
+
+                } else {
+
+                    isTrackable(
+                        detection
+                    )
+                }
+
             if (
-                !isTrackable(
-                    detection
-                )
+                !trackable
             ) {
                 continue
             }
@@ -725,9 +919,18 @@ class PoseTracker(
                     appearance
                 )
 
+            val minimumAppearance =
+                if (
+                    sidePoseMode
+                ) {
+                    SIDE_LOCKED_APPEARANCE_MIN
+                } else {
+                    LOCKED_APPEARANCE_MIN
+                }
+
             if (
                 appearanceSimilarity <
-                LOCKED_APPEARANCE_MIN
+                minimumAppearance
             ) {
                 continue
             }
@@ -749,15 +952,29 @@ class PoseTracker(
                             dy * dy
                 )
 
-            /*
-             * 멀리 있는 다른 사람은
-             * 외형 유사도가 매우 높지 않으면 거부
-             */
             if (
-                positionDistance > 0.38f &&
-                appearanceSimilarity < 0.75f
+                sidePoseMode
             ) {
-                continue
+
+                if (
+                    positionDistance >
+                    0.45f &&
+                    appearanceSimilarity <
+                    0.65f
+                ) {
+                    continue
+                }
+
+            } else {
+
+                if (
+                    positionDistance >
+                    0.38f &&
+                    appearanceSimilarity <
+                    0.75f
+                ) {
+                    continue
+                }
             }
 
             val sizeDifference =
@@ -766,9 +983,6 @@ class PoseTracker(
                     box
                 )
 
-            val currentRatio =
-                trackedBodyRatio
-
             val candidateRatio =
                 bodyRatio(
                     detection
@@ -776,52 +990,87 @@ class PoseTracker(
 
             val ratioDifference =
                 if (
-                    currentRatio > 0f &&
-                    candidateRatio > 0f
+                    trackedBodyRatio >
+                    0f &&
+                    candidateRatio >
+                    0f
                 ) {
 
                     relativeDifference(
-                        currentRatio,
+                        trackedBodyRatio,
                         candidateRatio
                     )
 
                 } else {
+
                     0.25f
                 }
 
             val score =
-                (1f -
-                        appearanceSimilarity) *
-                        0.58f +
-                        positionDistance *
-                        0.22f +
-                        sizeDifference *
-                        0.12f +
-                        ratioDifference *
-                        0.08f
+                if (
+                    sidePoseMode
+                ) {
+
+                    (
+                            1f -
+                                    appearanceSimilarity
+                            ) *
+                            0.45f +
+                            positionDistance *
+                            0.30f +
+                            sizeDifference *
+                            0.15f +
+                            ratioDifference *
+                            0.10f
+
+                } else {
+
+                    (
+                            1f -
+                                    appearanceSimilarity
+                            ) *
+                            0.58f +
+                            positionDistance *
+                            0.22f +
+                            sizeDifference *
+                            0.12f +
+                            ratioDifference *
+                            0.08f
+                }
+
+            val maxScore =
+                if (
+                    sidePoseMode
+                ) {
+                    SIDE_LOCKED_MAX_SCORE
+                } else {
+                    LOCKED_MAX_SCORE
+                }
 
             if (
                 score >
-                LOCKED_MAX_SCORE
+                maxScore
             ) {
                 continue
             }
 
             if (
                 best == null ||
-                score < best.score
+                score <
+                best.score
             ) {
 
-                best = CandidateMatch(
-                    detection =
-                        detection,
+                best =
+                    CandidateMatch(
+                        detection =
+                            detection,
 
-                    appearance =
-                        appearance,
+                        appearance =
+                            appearance,
 
-                    score =
-                        score
-                )
+                        score =
+                            score
+                    )
             }
         }
 
@@ -868,7 +1117,8 @@ class PoseTracker(
             )
 
         if (
-            ratio > 0f
+            ratio >
+            0f
         ) {
 
             trackedBodyRatio =
@@ -957,12 +1207,24 @@ class PoseTracker(
                     match.appearance
                 )
 
+            val requiredSimilarity =
+                if (
+                    sidePoseMode
+                ) {
+                    0.60f
+                } else {
+                    0.78f
+                }
+
             if (
                 sameCandidateSimilarity >=
-                0.78f
+                requiredSimilarity
             ) {
+
                 recoveryMatchCount++
+
             } else {
+
                 recoveryMatchCount =
                     1
             }
@@ -971,15 +1233,40 @@ class PoseTracker(
         recoveryCandidateAppearance =
             match.appearance
 
+        val requiredFrames =
+            if (
+                sidePoseMode
+            ) {
+                SIDE_RECOVERY_REQUIRED_FRAMES
+            } else {
+                RECOVERY_REQUIRED_FRAMES
+            }
+
         if (
             recoveryMatchCount >=
-            RECOVERY_REQUIRED_FRAMES
+            requiredFrames
         ) {
+
+            /*
+             * 측면 상태에서는 현재 측면 Appearance를
+             * 새로운 기준으로 사용.
+             */
+            val appearanceForLock =
+                if (
+                    sidePoseMode
+                ) {
+
+                    match.appearance
+
+                } else {
+
+                    lockedAppearance
+                        ?: match.appearance
+                }
 
             lockTarget(
                 match.detection,
-                lockedAppearance
-                    ?: match.appearance
+                appearanceForLock
             )
 
             Log.d(
@@ -1018,10 +1305,24 @@ class PoseTracker(
         detection in detections
         ) {
 
+            val valid =
+                if (
+                    sidePoseMode
+                ) {
+
+                    isSideTrackable(
+                        detection
+                    )
+
+                } else {
+
+                    isReliableForRegistration(
+                        detection
+                    )
+                }
+
             if (
-                !isReliableForRegistration(
-                    detection
-                )
+                !valid
             ) {
                 continue
             }
@@ -1038,9 +1339,18 @@ class PoseTracker(
                     appearance
                 )
 
+            val appearanceMinimum =
+                if (
+                    sidePoseMode
+                ) {
+                    SIDE_RECOVERY_APPEARANCE_MIN
+                } else {
+                    RECOVERY_APPEARANCE_MIN
+                }
+
             if (
                 appearanceSimilarity <
-                RECOVERY_APPEARANCE_MIN
+                appearanceMinimum
             ) {
                 continue
             }
@@ -1052,8 +1362,10 @@ class PoseTracker(
 
             val ratioDifference =
                 if (
-                    trackedBodyRatio > 0f &&
-                    candidateRatio > 0f
+                    trackedBodyRatio >
+                    0f &&
+                    candidateRatio >
+                    0f
                 ) {
 
                     relativeDifference(
@@ -1062,41 +1374,89 @@ class PoseTracker(
                     )
 
                 } else {
+
                     0.25f
                 }
 
+            val positionDistance =
+                trackedBox?.let {
+
+                    boxCenterDistance(
+                        it,
+                        detection.boundingBox
+                    )
+
+                } ?: 0f
+
             val score =
-                (1f -
-                        appearanceSimilarity) *
-                        0.75f +
-                        ratioDifference *
-                        0.15f +
-                        (1f -
-                                detection.personConfidence) *
-                        0.10f
+                if (
+                    sidePoseMode
+                ) {
+
+                    (
+                            1f -
+                                    appearanceSimilarity
+                            ) *
+                            0.55f +
+                            ratioDifference *
+                            0.15f +
+                            positionDistance *
+                            0.20f +
+                            (
+                                    1f -
+                                            detection.personConfidence
+                                    ) *
+                            0.10f
+
+                } else {
+
+                    (
+                            1f -
+                                    appearanceSimilarity
+                            ) *
+                            0.75f +
+                            ratioDifference *
+                            0.15f +
+                            (
+                                    1f -
+                                            detection.personConfidence
+                                    ) *
+                            0.10f
+                }
+
+            val maximumScore =
+                if (
+                    sidePoseMode
+                ) {
+                    SIDE_RECOVERY_MAX_SCORE
+                } else {
+                    RECOVERY_MAX_SCORE
+                }
 
             if (
                 score >
-                RECOVERY_MAX_SCORE
+                maximumScore
             ) {
                 continue
             }
 
             if (
                 best == null ||
-                score < best.score
+                score <
+                best.score
             ) {
 
-                best = CandidateMatch(
-                    detection =
-                        detection,
+                best =
+                    CandidateMatch(
+                        detection =
+                            detection,
 
-                    appearance =
-                        appearance,
+                        appearance =
+                            appearance,
 
-                    score =
-                        score
-                )
+                        score =
+                            score
+                    )
             }
         }
 
@@ -1104,15 +1464,21 @@ class PoseTracker(
     }
 
     // ============================================================
-    // Pose validity
+    // Pose Validity
     // ============================================================
 
+    /*
+     * 정면 등록 기준.
+     *
+     * 양쪽 어깨 + 양쪽 골반 필요.
+     */
     private fun isReliableForRegistration(
         detection: RawPersonDetection
     ): Boolean {
 
         if (
-            detection.keypoints.size < 13
+            detection.keypoints.size <
+            13
         ) {
             return false
         }
@@ -1129,12 +1495,13 @@ class PoseTracker(
         val rightHip =
             detection.keypoints[12]
 
-        val points = listOf(
-            leftShoulder,
-            rightShoulder,
-            leftHip,
-            rightHip
-        )
+        val points =
+            listOf(
+                leftShoulder,
+                rightShoulder,
+                leftHip,
+                rightHip
+            )
 
         for (
         point in points
@@ -1147,15 +1514,15 @@ class PoseTracker(
                 return false
             }
 
-            /*
-             * 화면 가장자리에 걸친 반쪽 사용자는
-             * 신규 등록/복구에서 제외
-             */
             if (
-                point.x < 0.03f ||
-                point.x > 0.97f ||
-                point.y < 0.03f ||
-                point.y > 0.97f
+                point.x <
+                0.03f ||
+                point.x >
+                0.97f ||
+                point.y <
+                0.03f ||
+                point.y >
+                0.97f
             ) {
                 return false
             }
@@ -1175,8 +1542,10 @@ class PoseTracker(
             )
 
         if (
-            shoulderSpan < 0.04f ||
-            torso < 0.07f
+            shoulderSpan <
+            0.04f ||
+            torso <
+            0.07f
         ) {
             return false
         }
@@ -1184,12 +1553,16 @@ class PoseTracker(
         return true
     }
 
+    /*
+     * 일반 LOCK 추적.
+     */
     private fun isTrackable(
         detection: RawPersonDetection
     ): Boolean {
 
         if (
-            detection.keypoints.size < 11
+            detection.keypoints.size <
+            11
         ) {
             return false
         }
@@ -1208,8 +1581,75 @@ class PoseTracker(
                 )
     }
 
+    /*
+     * 측면에서는 반대쪽 관절이
+     * 몸에 가려지는 것이 정상.
+     *
+     * 따라서 양쪽 관절을 모두 요구하지 않는다.
+     */
+    private fun isSideTrackable(
+        detection: RawPersonDetection
+    ): Boolean {
+
+        if (
+            detection.keypoints.size <
+            13
+        ) {
+            return false
+        }
+
+        if (
+            detection.personConfidence <
+            0.35f
+        ) {
+            return false
+        }
+
+        val leftShoulder =
+            detection.keypoints[5]
+
+        val rightShoulder =
+            detection.keypoints[6]
+
+        val leftElbow =
+            detection.keypoints[7]
+
+        val rightElbow =
+            detection.keypoints[8]
+
+        val leftHip =
+            detection.keypoints[11]
+
+        val rightHip =
+            detection.keypoints[12]
+
+        val shoulderVisible =
+            max(
+                leftShoulder.confidence,
+                rightShoulder.confidence
+            ) >= 0.35f
+
+        val elbowVisible =
+            max(
+                leftElbow.confidence,
+                rightElbow.confidence
+            ) >= 0.30f
+
+        val hipVisible =
+            max(
+                leftHip.confidence,
+                rightHip.confidence
+            ) >= 0.30f
+
+        return (
+                shoulderVisible &&
+                        elbowVisible &&
+                        hipVisible
+                )
+    }
+
     // ============================================================
-    // Body geometry
+    // Body Geometry
     // ============================================================
 
     private fun bodyRatio(
@@ -1217,7 +1657,8 @@ class PoseTracker(
     ): Float {
 
         if (
-            detection.keypoints.size < 13
+            detection.keypoints.size <
+            13
         ) {
             return 0f
         }
@@ -1242,13 +1683,16 @@ class PoseTracker(
             )
 
         if (
-            shoulderSpan <= 0f ||
-            torso <= 0f
+            shoulderSpan <=
+            0f ||
+            torso <=
+            0f
         ) {
             return 0f
         }
 
-        return shoulderSpan / torso
+        return shoulderSpan /
+                torso
     }
 
     private fun torsoLength(
@@ -1256,7 +1700,8 @@ class PoseTracker(
     ): Float {
 
         if (
-            detection.keypoints.size < 13
+            detection.keypoints.size <
+            13
         ) {
             return 0f
         }
@@ -1273,6 +1718,11 @@ class PoseTracker(
         val rightHip =
             detection.keypoints[12]
 
+        /*
+         * 정면 기준 body ratio 계산용.
+         * 측면에서 안 잡히면 0 반환하고,
+         * 측면 Tracker에서는 해당 점수 비중을 낮게 사용.
+         */
         if (
             leftShoulder.confidence <
             KEYPOINT_CONFIDENCE ||
@@ -1290,25 +1740,29 @@ class PoseTracker(
             (
                     leftShoulder.x +
                             rightShoulder.x
-                    ) / 2f
+                    ) /
+                    2f
 
         val shoulderCenterY =
             (
                     leftShoulder.y +
                             rightShoulder.y
-                    ) / 2f
+                    ) /
+                    2f
 
         val hipCenterX =
             (
                     leftHip.x +
                             rightHip.x
-                    ) / 2f
+                    ) /
+                    2f
 
         val hipCenterY =
             (
                     leftHip.y +
                             rightHip.y
-                    ) / 2f
+                    ) /
+                    2f
 
         return distance(
             shoulderCenterX,
@@ -1355,7 +1809,8 @@ class PoseTracker(
         return (
                 widthDifference +
                         heightDifference
-                ) / 2f
+                ) /
+                2f
     }
 
     private fun relativeDifference(
@@ -1364,7 +1819,8 @@ class PoseTracker(
     ): Float {
 
         if (
-            reference <= 0f
+            reference <=
+            0f
         ) {
             return 1f
         }
@@ -1392,10 +1848,12 @@ class PoseTracker(
     ): Float {
 
         val dx =
-            x2 - x1
+            x2 -
+                    x1
 
         val dy =
-            y2 - y1
+            y2 -
+                    y1
 
         return sqrt(
             dx * dx +

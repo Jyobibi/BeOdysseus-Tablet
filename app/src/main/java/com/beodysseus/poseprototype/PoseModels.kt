@@ -27,14 +27,15 @@ enum class TrackingState {
     LOST
 }
 
-/*
- * USER 01 추적 상태와는 별개인
- * 자세 측정 진행 단계.
- */
 enum class MeasurementPhase {
     WAITING_FRONT,
     TURNING,
     SIDE_MEASURING
+}
+
+enum class ArmSide {
+    LEFT,
+    RIGHT
 }
 
 data class TrackerUpdate(
@@ -44,9 +45,21 @@ data class TrackerUpdate(
 )
 
 data class PoseMetricsResult(
+
+    // 기존 값 - 호환용
     val shoulderTiltDegree: Float? = null,
-    val bodyLeanDegree: Float? = null,
     val armAlignmentDegree: Float? = null,
+
+    // 최종 측면 양궁 지표
+    val bodyLeanDegree: Float? = null,
+    val bowArmStraightnessErrorDegree: Float? = null,
+    val drawArmElbowAngleDegree: Float? = null,
+
+    // 어떤 팔로 판단했는지 확인용
+    val bowArmSide: ArmSide? = null,
+    val drawArmSide: ArmSide? = null,
+
+    // Debug / 향후 활용
     val leftElbowAngleDegree: Float? = null,
     val rightElbowAngleDegree: Float? = null
 )
@@ -56,9 +69,17 @@ data class TrackedPose(
     val keypoints: List<PoseKeyPoint>,
     val personConfidence: Float,
 
+    // 기존 값
     val shoulderTiltDegree: Float?,
-    val bodyLeanDegree: Float?,
     val armAlignmentDegree: Float?,
+
+    // 최종 측면 양궁 지표
+    val bodyLeanDegree: Float?,
+    val bowArmStraightnessErrorDegree: Float?,
+    val drawArmElbowAngleDegree: Float?,
+
+    val bowArmSide: ArmSide?,
+    val drawArmSide: ArmSide?,
 
     val leftElbowAngleDegree: Float?,
     val rightElbowAngleDegree: Float?
@@ -67,13 +88,10 @@ data class TrackedPose(
 data class PoseFrameResult(
     val state: TrackingState,
 
-    // 기존 USER 등록 카운트다운
     val remainingSeconds: Int,
 
-    // 새로 추가한 자세 측정 단계
     val measurementPhase: MeasurementPhase,
 
-    // 측면 전환 카운트다운
     val measurementRemainingSeconds: Int,
 
     val pose: TrackedPose?,

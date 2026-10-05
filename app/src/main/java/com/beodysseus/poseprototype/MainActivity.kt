@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.ceil
 
 class MainActivity :
@@ -37,8 +38,31 @@ class MainActivity :
         private const val INFERENCE_INTERVAL_MS =
             250L
 
+        /*
+         * 기존 3초 → 5초
+         *
+         * 사용자가 실제 활을 들고
+         * 측면 양궁 자세까지 완성할 시간.
+         */
         private const val TURNING_DURATION_MS =
-            3000L
+            5000L
+
+        /*
+         * 5초 준비 시간의 마지막 1.5초 동안
+         * 활팔 기준값을 수집한다.
+         */
+        private const val BOW_CALIBRATION_WINDOW_MS =
+            1500L
+
+        /*
+         * 너무 적은 프레임으로
+         * 기준을 만들지 않기 위한 최소 샘플 수.
+         */
+        private const val MIN_BOW_CALIBRATION_SAMPLES =
+            3
+
+        private const val MAX_BOW_CALIBRATION_SAMPLES =
+            10
     }
 
     private lateinit var previewView:
@@ -50,13 +74,13 @@ class MainActivity :
     private lateinit var userStatusText:
             TextView
 
-    private lateinit var shoulderTiltText:
-            TextView
-
     private lateinit var bodyLeanText:
             TextView
 
-    private lateinit var armAlignmentText:
+    private lateinit var bowArmText:
+            TextView
+
+    private lateinit var drawArmText:
             TextView
 
     private lateinit var retryUserButton:
@@ -80,24 +104,47 @@ class MainActivity :
     private var lastInferenceTime =
         0L
 
+    // ============================================================
+    // Measurement State
+    // ============================================================
+
     private var measurementPhase =
         MeasurementPhase.WAITING_FRONT
 
     private var turningStartTime =
         0L
 
-    /*
-     * SIDE_MEASURING 진입 후
-     * 측면 프로필 재등록이 아직 안 됐는지 표시.
-     */
     private var sideProfileRefreshPending =
         false
+
+    // ============================================================
+    // 활팔 Calibration
+    // ============================================================
+
+    /*
+     * 5초 준비시간 마지막 구간의
+     * raw 활팔 오차값 저장.
+     *
+     * 예:
+     * 29, 31, 30, 32...
+     */
+    private val bowCalibrationSamples =
+        mutableListOf<Float>()
+
+    /*
+     * 실제 측정에 사용할 활팔 기준값.
+     *
+     * 예:
+     * YOLO가 곧게 편 팔을 30°로 본다면
+     * baseline = 30°
+     */
+    private var bowArmBaselineError:
+            Float? = null
 
     private val requestCameraPermission =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
-        ) {
-                granted ->
+        ) { granted ->
 
             if (
                 granted
@@ -146,19 +193,19 @@ class MainActivity :
                 R.id.userStatusText
             )
 
-        shoulderTiltText =
-            findViewById(
-                R.id.shoulderTiltText
-            )
-
         bodyLeanText =
             findViewById(
                 R.id.bodyLeanText
             )
 
-        armAlignmentText =
+        bowArmText =
             findViewById(
-                R.id.armAlignmentText
+                R.id.bowArmText
+            )
+
+        drawArmText =
+            findViewById(
+                R.id.drawArmText
             )
 
         retryUserButton =
@@ -236,6 +283,15 @@ class MainActivity :
             sideProfileRefreshPending =
                 false
 
+            /*
+             * 사용자 다시 등록 시
+             * 이전 사람의 보정값도 제거.
+             */
+            bowCalibrationSamples.clear()
+
+            bowArmBaselineError =
+                null
+
             cameraExecutor.execute {
 
                 poseTracker.restart()
@@ -286,8 +342,7 @@ class MainActivity :
 
             imageAnalysis.setAnalyzer(
                 cameraExecutor
-            ) {
-                    imageProxy ->
+            ) { imageProxy ->
 
                 try {
 
@@ -395,37 +450,44 @@ class MainActivity :
         bitmap: Bitmap
     ) {
 
-        // 1. YOLO26n-Pose
+        // --------------------------------------------------------
+        // 1. YOLO Pose
+        // --------------------------------------------------------
+
         val detections =
             poseModelLoader.runInference(
                 bitmap
             )
 
-        // 2. 기존 USER 01 Tracker
+        // --------------------------------------------------------
+        // 2. USER 01 Tracking
+        // --------------------------------------------------------
+
         val trackerUpdate =
             poseTracker.update(
                 detections,
                 bitmap
             )
 
-        // 3. 측정 단계 관리
+        // --------------------------------------------------------
+        // 3. Measurement Phase
+        // --------------------------------------------------------
+
         updateMeasurementPhase(
             trackerUpdate.state
         )
 
-        /*
-         * 측면 측정 단계 진입 후
-         * USER 01이 안정적으로 잡힌 첫 프레임에서
-         * 현재 측면 모습을 새로운 추적 프로필로 저장.
-         */
+        // --------------------------------------------------------
+        // 4. 측면 프로필 갱신
+        // --------------------------------------------------------
+
         if (
             measurementPhase ==
             MeasurementPhase.SIDE_MEASURING &&
             sideProfileRefreshPending &&
             trackerUpdate.state ==
             TrackingState.LOCKED &&
-            trackerUpdate.detection !=
-            null
+            trackerUpdate.detection != null
         ) {
 
             val refreshed =
@@ -450,13 +512,12 @@ class MainActivity :
             }
         }
 
-        /*
-         * 추적이 완전히 끊긴 경우
-         * 이전 Skeleton 좌표 제거.
-         */
+        // --------------------------------------------------------
+        // 5. Tracking 끊김 시 smoothing 초기화
+        // --------------------------------------------------------
+
         if (
-            trackerUpdate.detection ==
-            null &&
+            trackerUpdate.detection == null &&
             (
                     trackerUpdate.state ==
                             TrackingState.SEARCHING ||
@@ -470,7 +531,10 @@ class MainActivity :
             poseSmoother.reset()
         }
 
-        // 4. Skeleton smoothing
+        // --------------------------------------------------------
+        // 6. Skeleton smoothing
+        // --------------------------------------------------------
+
         val smoothedDetection =
             trackerUpdate.detection?.let {
 
@@ -479,16 +543,21 @@ class MainActivity :
                 )
             }
 
-        /*
-         * 5. 자세 지표
-         *
-         * SIDE_MEASURING일 때만 계산.
-         *
-         * PoseMetrics는 아직 기존 버전 유지.
-         */
+        // --------------------------------------------------------
+        // 7. 활팔 Calibration sample 수집
+        // --------------------------------------------------------
+
+        collectBowCalibrationSample(
+            trackerUpdate.state,
+            smoothedDetection
+        )
+
+        // --------------------------------------------------------
+        // 8. 최종 자세 지표
+        // --------------------------------------------------------
+
         val trackedPose =
-            smoothedDetection?.let {
-                    detection ->
+            smoothedDetection?.let { detection ->
 
                 val metrics =
                     if (
@@ -507,7 +576,23 @@ class MainActivity :
                         PoseMetricsResult()
                     }
 
+                /*
+                 * PoseMetrics의 활팔 값은 아직
+                 * YOLO raw 기준 오차이다.
+                 *
+                 * 예:
+                 * 곧게 폈는데 30°
+                 *
+                 * 여기서 calibration 기준을 빼
+                 * 사용자 기준 오차로 바꾼다.
+                 */
+                val calibratedBowError =
+                    calculateCalibratedBowError(
+                        metrics.bowArmStraightnessErrorDegree
+                    )
+
                 TrackedPose(
+
                     boundingBox =
                         detection.boundingBox,
 
@@ -520,11 +605,27 @@ class MainActivity :
                     shoulderTiltDegree =
                         metrics.shoulderTiltDegree,
 
+                    armAlignmentDegree =
+                        metrics.armAlignmentDegree,
+
                     bodyLeanDegree =
                         metrics.bodyLeanDegree,
 
-                    armAlignmentDegree =
-                        metrics.armAlignmentDegree,
+                    /*
+                     * UI 및 이후 Stage 저장에는
+                     * 보정된 값을 사용.
+                     */
+                    bowArmStraightnessErrorDegree =
+                        calibratedBowError,
+
+                    drawArmElbowAngleDegree =
+                        metrics.drawArmElbowAngleDegree,
+
+                    bowArmSide =
+                        metrics.bowArmSide,
+
+                    drawArmSide =
+                        metrics.drawArmSide,
 
                     leftElbowAngleDegree =
                         metrics.leftElbowAngleDegree,
@@ -533,6 +634,10 @@ class MainActivity :
                         metrics.rightElbowAngleDegree
                 )
             }
+
+        // --------------------------------------------------------
+        // 9. Frame Result
+        // --------------------------------------------------------
 
         val frameResult =
             PoseFrameResult(
@@ -586,11 +691,12 @@ class MainActivity :
             measurementPhase
         ) {
 
+            // ----------------------------------------------------
+            // 정면 USER 등록 대기
+            // ----------------------------------------------------
+
             MeasurementPhase.WAITING_FRONT -> {
 
-                /*
-                 * 기존 USER 01 정면 등록 완료.
-                 */
                 if (
                     trackingState ==
                     TrackingState.LOCKED
@@ -603,10 +709,14 @@ class MainActivity :
                         now
 
                     /*
-                     * 회전하면서 정면 프로필과
-                     * 차이가 커질 것을 고려해
-                     * Tracker를 측면 전환 모드로 변경.
+                     * 새로운 사용자이므로
+                     * 보정값 초기화.
                      */
+                    bowCalibrationSamples.clear()
+
+                    bowArmBaselineError =
+                        null
+
                     poseTracker.beginSideTransitionMode()
 
                     Log.d(
@@ -616,6 +726,10 @@ class MainActivity :
                 }
             }
 
+            // ----------------------------------------------------
+            // 측면 전환 + 양궁 자세 준비
+            // ----------------------------------------------------
+
             MeasurementPhase.TURNING -> {
 
                 if (
@@ -624,13 +738,15 @@ class MainActivity :
                     TURNING_DURATION_MS
                 ) {
 
+                    /*
+                     * 마지막 1.5초 동안 모은 값으로
+                     * 활팔 기준값 확정.
+                     */
+                    finalizeBowCalibration()
+
                     measurementPhase =
                         MeasurementPhase.SIDE_MEASURING
 
-                    /*
-                     * 다음 안정적인 LOCKED 프레임에서
-                     * 측면 프로필을 저장.
-                     */
                     sideProfileRefreshPending =
                         true
 
@@ -643,11 +759,225 @@ class MainActivity :
                 }
             }
 
+            // ----------------------------------------------------
+            // 측면 실시간 측정
+            // ----------------------------------------------------
+
             MeasurementPhase.SIDE_MEASURING -> {
-                // 계속 실시간 측정
+                // 유지
             }
         }
     }
+
+    // ============================================================
+    // Bow Arm Calibration
+    // ============================================================
+
+    private fun collectBowCalibrationSample(
+        trackingState: TrackingState,
+        detection: RawPersonDetection?
+    ) {
+
+        if (
+            measurementPhase !=
+            MeasurementPhase.TURNING
+        ) {
+            return
+        }
+
+        if (
+            trackingState !=
+            TrackingState.LOCKED
+        ) {
+            return
+        }
+
+        if (
+            detection ==
+            null
+        ) {
+            return
+        }
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        val elapsed =
+            now -
+                    turningStartTime
+
+        /*
+         * 마지막 1.5초 전까지는
+         * 사용자가 돌아서 자세를 만드는 시간.
+         */
+        val calibrationStart =
+            TURNING_DURATION_MS -
+                    BOW_CALIBRATION_WINDOW_MS
+
+        if (
+            elapsed <
+            calibrationStart
+        ) {
+            return
+        }
+
+        val metrics =
+            poseMetrics.calculate(
+                detection
+            )
+
+        val rawBowError =
+            metrics
+                .bowArmStraightnessErrorDegree
+                ?: return
+
+        /*
+         * 비정상적으로 큰 값은
+         * calibration에서 제외.
+         *
+         * 실제 우리가 기대하는
+         * 곧게 편 팔의 raw 값은
+         * 현재 테스트 기준 약 30° 부근.
+         */
+        if (
+            rawBowError !in
+            0f..90f
+        ) {
+            return
+        }
+
+        bowCalibrationSamples.add(
+            rawBowError
+        )
+
+        if (
+            bowCalibrationSamples.size >
+            MAX_BOW_CALIBRATION_SAMPLES
+        ) {
+
+            bowCalibrationSamples.removeAt(
+                0
+            )
+        }
+
+        Log.d(
+            TAG,
+            "BOW CALIBRATION SAMPLE: $rawBowError"
+        )
+    }
+
+    private fun finalizeBowCalibration() {
+
+        if (
+            bowCalibrationSamples.size <
+            MIN_BOW_CALIBRATION_SAMPLES
+        ) {
+
+            /*
+             * 충분히 못 모은 경우
+             * SIDE_MEASURING 첫 정상 프레임에서
+             * fallback으로 기준을 잡는다.
+             */
+            bowArmBaselineError =
+                null
+
+            Log.w(
+                TAG,
+                "BOW CALIBRATION: NOT ENOUGH SAMPLES (${bowCalibrationSamples.size})"
+            )
+
+            return
+        }
+
+        /*
+         * 평균보다 중앙값을 사용.
+         *
+         * YOLO가 한 프레임 튀더라도
+         * 기준값에 영향이 적다.
+         */
+        val sorted =
+            bowCalibrationSamples.sorted()
+
+        val middle =
+            sorted.size /
+                    2
+
+        bowArmBaselineError =
+            if (
+                sorted.size % 2 ==
+                0
+            ) {
+
+                (
+                        sorted[middle - 1] +
+                                sorted[middle]
+                        ) /
+                        2f
+
+            } else {
+
+                sorted[middle]
+            }
+
+        Log.d(
+            TAG,
+            "BOW CALIBRATION COMPLETE: baseline=$bowArmBaselineError, samples=${bowCalibrationSamples.size}"
+        )
+    }
+
+    private fun calculateCalibratedBowError(
+        rawBowError: Float?
+    ): Float? {
+
+        if (
+            rawBowError ==
+            null
+        ) {
+            return null
+        }
+
+        /*
+         * 준비 시간에서 기준값을 못 잡은 경우
+         * 측면 측정의 첫 정상 프레임을 fallback으로 사용.
+         */
+        if (
+            bowArmBaselineError ==
+            null
+        ) {
+
+            bowArmBaselineError =
+                rawBowError
+
+            Log.w(
+                TAG,
+                "BOW CALIBRATION FALLBACK: baseline=$rawBowError"
+            )
+
+            return 0f
+        }
+
+        /*
+         * 최종 활팔 오차
+         *
+         * 예:
+         *
+         * baseline = 30°
+         *
+         * 현재 31°
+         * → 1°
+         *
+         * 현재 110°
+         * → 80°
+         */
+        return abs(
+            rawBowError -
+                    bowArmBaselineError!!
+        )
+    }
+
+    // ============================================================
+    // Timer
+    // ============================================================
 
     private fun getTurningRemainingSeconds():
             Int {
@@ -722,10 +1052,6 @@ class MainActivity :
 
             TrackingState.RECOVERING -> {
 
-                /*
-                 * 측면 측정 중 잠깐 관절을 놓친 경우에는
-                 * 다시 USER 등록하는 것처럼 보이지 않도록 표시.
-                 */
                 if (
                     result.measurementPhase ==
                     MeasurementPhase.SIDE_MEASURING
@@ -770,6 +1096,10 @@ class MainActivity :
             result.measurementPhase
         ) {
 
+            // ----------------------------------------------------
+            // USER 등록 완료 전
+            // ----------------------------------------------------
+
             MeasurementPhase.WAITING_FRONT -> {
 
                 userStatusText.text =
@@ -778,13 +1108,36 @@ class MainActivity :
                 clearMetricUI()
             }
 
+            // ----------------------------------------------------
+            // 측면 양궁 자세 준비
+            // ----------------------------------------------------
+
             MeasurementPhase.TURNING -> {
 
-                userStatusText.text =
-                    "측면으로 돌아서 양궁 자세를 취해주세요. ${result.measurementRemainingSeconds}"
+                if (
+                    result.measurementRemainingSeconds <=
+                    1
+                ) {
+
+                    /*
+                     * 마지막 1초는 움직이지 않고
+                     * 실제 양궁 자세 유지.
+                     */
+                    userStatusText.text =
+                        "양궁 자세를 유지해주세요. 활팔 기준 보정 중..."
+
+                } else {
+
+                    userStatusText.text =
+                        "활을 들고 측면 양궁 자세를 취해주세요. ${result.measurementRemainingSeconds}"
+                }
 
                 clearMetricUI()
             }
+
+            // ----------------------------------------------------
+            // 실시간 측정
+            // ----------------------------------------------------
 
             MeasurementPhase.SIDE_MEASURING -> {
 
@@ -830,42 +1183,26 @@ class MainActivity :
             return
         }
 
-        val shoulder =
-            pose.shoulderTiltDegree
-
-        val body =
+        val bodyLean =
             pose.bodyLeanDegree
 
-        val arm =
-            pose.armAlignmentDegree
+        val bowError =
+            pose
+                .bowArmStraightnessErrorDegree
 
-        shoulderTiltText.text =
-            if (
-                shoulder !=
-                null
-            ) {
-
-                String.format(
-                    Locale.US,
-                    "어깨 기울기: %+.1f°",
-                    shoulder
-                )
-
-            } else {
-
-                "어깨 기울기: --"
-            }
+        val drawError =
+            pose.drawArmElbowAngleDegree
 
         bodyLeanText.text =
             if (
-                body !=
+                bodyLean !=
                 null
             ) {
 
                 String.format(
                     Locale.US,
-                    "상체 기울기: %+.1f°",
-                    body
+                    "상체 기울기: %.1f°",
+                    bodyLean
                 )
 
             } else {
@@ -873,34 +1210,51 @@ class MainActivity :
                 "상체 기울기: --"
             }
 
-        armAlignmentText.text =
+        bowArmText.text =
             if (
-                arm !=
+                bowError !=
                 null
             ) {
 
                 String.format(
                     Locale.US,
-                    "팔 정렬: %.1f°",
-                    arm
+                    "활팔 기준 오차: %.1f°",
+                    bowError
                 )
 
             } else {
 
-                "팔 정렬: --"
+                "활팔 기준 오차: --"
+            }
+
+        drawArmText.text =
+            if (
+                drawError !=
+                null
+            ) {
+
+                String.format(
+                    Locale.US,
+                    "당김팔 정렬 오차: %.1f°",
+                    drawError
+                )
+
+            } else {
+
+                "당김팔 정렬 오차: --"
             }
     }
 
     private fun clearMetricUI() {
 
-        shoulderTiltText.text =
-            "어깨 기울기: --"
-
         bodyLeanText.text =
             "상체 기울기: --"
 
-        armAlignmentText.text =
-            "팔 정렬: --"
+        bowArmText.text =
+            "활팔 기준 오차: --"
+
+        drawArmText.text =
+            "당김팔 정렬 오차: --"
     }
 
     // ============================================================

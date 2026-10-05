@@ -10,99 +10,152 @@ import kotlin.math.sqrt
 class PoseMetrics {
 
     companion object {
-        private const val CONFIDENCE_THRESHOLD =
-            0.45f
+
+        private const val KEYPOINT_CONFIDENCE_THRESHOLD =
+            0.35f
+
+        /*
+         * 공학제 시연 기준
+         *
+         * true  = 오른손잡이
+         *         왼팔: 활팔
+         *         오른팔: 당김팔
+         *
+         * false = 왼손잡이
+         *         오른팔: 활팔
+         *         왼팔: 당김팔
+         */
+        private const val RIGHT_HANDED =
+            true
     }
 
     fun calculate(
         detection: RawPersonDetection
     ): PoseMetricsResult {
 
+        val leftElbowAngle =
+            calculateElbowAngle(
+                detection,
+                shoulderIndex = 5,
+                elbowIndex = 7,
+                wristIndex = 9
+            )
+
+        val rightElbowAngle =
+            calculateElbowAngle(
+                detection,
+                shoulderIndex = 6,
+                elbowIndex = 8,
+                wristIndex = 10
+            )
+
+        /*
+         * 오른손잡이
+         * 활팔  = LEFT
+         * 당김팔 = RIGHT
+         *
+         * 왼손잡이는 반대.
+         */
+        val bowElbowAngle =
+            if (RIGHT_HANDED) {
+                leftElbowAngle
+            } else {
+                rightElbowAngle
+            }
+
+        /*
+         * 활팔이 완전한 직선이면
+         *
+         * elbow angle = 180°
+         * error       = 0°
+         */
+        val bowArmStraightnessError =
+            bowElbowAngle?.let {
+                abs(
+                    180f - it
+                )
+            }
+
+        /*
+         * 당김팔은 elbow angle 자체가 아니라
+         * Elbow → Wrist 선의 수평 정렬 오차를 사용.
+         */
+        val drawArmAlignmentError =
+            if (RIGHT_HANDED) {
+
+                calculateForearmHorizontalError(
+                    detection,
+                    elbowIndex = 8,
+                    wristIndex = 10
+                )
+
+            } else {
+
+                calculateForearmHorizontalError(
+                    detection,
+                    elbowIndex = 7,
+                    wristIndex = 9
+                )
+            }
+
         return PoseMetricsResult(
+
+            // 기존 Debug 값
             shoulderTiltDegree =
                 calculateShoulderTilt(
                     detection
                 ),
+
+            /*
+             * 기존 armAlignmentDegree를
+             * 당김팔 정렬 오차 값으로 사용.
+             */
+            armAlignmentDegree =
+                drawArmAlignmentError,
 
             bodyLeanDegree =
                 calculateBodyLean(
                     detection
                 ),
 
-            armAlignmentDegree =
-                calculateArmAlignment(
-                    detection
-                ),
+            bowArmStraightnessErrorDegree =
+                bowArmStraightnessError,
+
+            /*
+             * 기존 필드명은 아직 유지하지만
+             * 값은 이제 "당김팔 정렬 오차"이다.
+             *
+             * 최종 인터페이스 정리 때
+             * drawArmAlignmentErrorDegree로
+             * 이름을 한 번에 변경할 예정.
+             */
+            drawArmElbowAngleDegree =
+                drawArmAlignmentError,
+
+            bowArmSide =
+                if (RIGHT_HANDED) {
+                    ArmSide.LEFT
+                } else {
+                    ArmSide.RIGHT
+                },
+
+            drawArmSide =
+                if (RIGHT_HANDED) {
+                    ArmSide.RIGHT
+                } else {
+                    ArmSide.LEFT
+                },
 
             leftElbowAngleDegree =
-                calculateElbowAngle(
-                    detection,
-                    shoulderIndex = 5,
-                    elbowIndex = 7,
-                    wristIndex = 9
-                ),
+                leftElbowAngle,
 
             rightElbowAngleDegree =
-                calculateElbowAngle(
-                    detection,
-                    shoulderIndex = 6,
-                    elbowIndex = 8,
-                    wristIndex = 10
-                )
+                rightElbowAngle
         )
     }
 
     // ============================================================
-    // Shoulder Tilt
-    // ============================================================
-
-    private fun calculateShoulderTilt(
-        detection: RawPersonDetection
-    ): Float? {
-
-        val left =
-            point(
-                detection,
-                5
-            ) ?: return null
-
-        val right =
-            point(
-                detection,
-                6
-            ) ?: return null
-
-        val dx =
-            right.x -
-                    left.x
-
-        if (
-            abs(dx) <
-            0.0001f
-        ) {
-            return null
-        }
-
-        /*
-         * 기존 실제 전면카메라 테스트 기준 유지
-         *
-         * + : 사용자 오른쪽 어깨가 높음
-         * - : 사용자 왼쪽 어깨가 높음
-         */
-        val radians =
-            atan2(
-                left.y -
-                        right.y,
-                abs(dx)
-            )
-
-        return Math.toDegrees(
-            radians.toDouble()
-        ).toFloat()
-    }
-
-    // ============================================================
-    // Body Lean
+    // 1. 상체 기울기 오차
     // ============================================================
 
     private fun calculateBodyLean(
@@ -113,69 +166,119 @@ class PoseMetrics {
             point(
                 detection,
                 5
-            ) ?: return null
+            )
 
         val rightShoulder =
             point(
                 detection,
                 6
-            ) ?: return null
+            )
 
         val leftHip =
             point(
                 detection,
                 11
-            ) ?: return null
+            )
 
         val rightHip =
             point(
                 detection,
                 12
-            ) ?: return null
+            )
 
-        val shoulderCenterX =
-            (
-                    leftShoulder.x +
-                            rightShoulder.x
-                    ) / 2f
+        /*
+         * 측면에서는 카메라에 더 잘 보이는
+         * Shoulder-Hip 한 쌍을 사용한다.
+         */
+        val leftScore =
+            if (
+                leftShoulder != null &&
+                leftHip != null
+            ) {
 
-        val shoulderCenterY =
-            (
-                    leftShoulder.y +
-                            rightShoulder.y
-                    ) / 2f
+                min(
+                    leftShoulder.confidence,
+                    leftHip.confidence
+                )
 
-        val hipCenterX =
-            (
-                    leftHip.x +
-                            rightHip.x
-                    ) / 2f
+            } else {
 
-        val hipCenterY =
-            (
-                    leftHip.y +
-                            rightHip.y
-                    ) / 2f
+                -1f
+            }
 
-        val horizontal =
-            shoulderCenterX -
-                    hipCenterX
+        val rightScore =
+            if (
+                rightShoulder != null &&
+                rightHip != null
+            ) {
 
-        val vertical =
-            hipCenterY -
-                    shoulderCenterY
+                min(
+                    rightShoulder.confidence,
+                    rightHip.confidence
+                )
+
+            } else {
+
+                -1f
+            }
 
         if (
-            abs(vertical) <
+            leftScore < 0f &&
+            rightScore < 0f
+        ) {
+            return null
+        }
+
+        val shoulder: PoseKeyPoint
+        val hip: PoseKeyPoint
+
+        if (
+            leftScore >= rightScore
+        ) {
+
+            shoulder =
+                leftShoulder
+                    ?: return null
+
+            hip =
+                leftHip
+                    ?: return null
+
+        } else {
+
+            shoulder =
+                rightShoulder
+                    ?: return null
+
+            hip =
+                rightHip
+                    ?: return null
+        }
+
+        val dx =
+            shoulder.x -
+                    hip.x
+
+        val dy =
+            hip.y -
+                    shoulder.y
+
+        if (
+            abs(dy) <
             0.0001f
         ) {
             return null
         }
 
+        /*
+         * 수직선 기준 오차.
+         *
+         * 몸통이 수직이면 0°.
+         */
         val radians =
             atan2(
-                horizontal,
-                abs(vertical)
+                abs(dx),
+                abs(dy)
             )
 
         return Math.toDegrees(
@@ -184,47 +287,8 @@ class PoseMetrics {
     }
 
     // ============================================================
-    // Arm Alignment
+    // 2. 활팔 펴짐 오차
     // ============================================================
-
-    private fun calculateArmAlignment(
-        detection: RawPersonDetection
-    ): Float? {
-
-        val left =
-            calculateElbowAngle(
-                detection,
-                shoulderIndex = 5,
-                elbowIndex = 7,
-                wristIndex = 9
-            )
-
-        val right =
-            calculateElbowAngle(
-                detection,
-                shoulderIndex = 6,
-                elbowIndex = 8,
-                wristIndex = 10
-            )
-
-        return when {
-            left != null &&
-                    right != null ->
-                max(
-                    left,
-                    right
-                )
-
-            left != null ->
-                left
-
-            right != null ->
-                right
-
-            else ->
-                null
-        }
-    }
 
     private fun calculateElbowAngle(
         detection: RawPersonDetection,
@@ -250,6 +314,12 @@ class PoseMetrics {
                 detection,
                 wristIndex
             ) ?: return null
+
+        /*
+         * Elbow를 꼭짓점으로:
+         *
+         * Shoulder ← Elbow → Wrist
+         */
 
         val vector1X =
             shoulder.x -
@@ -284,8 +354,10 @@ class PoseMetrics {
             )
 
         if (
-            length1 <= 0f ||
-            length2 <= 0f
+            length1 <=
+            0.0001f ||
+            length2 <=
+            0.0001f
         ) {
             return null
         }
@@ -302,13 +374,14 @@ class PoseMetrics {
                                     length2
                             )
 
-        cosine = min(
-            1f,
-            max(
-                -1f,
-                cosine
+        cosine =
+            min(
+                1f,
+                max(
+                    -1f,
+                    cosine
+                )
             )
-        )
 
         return Math.toDegrees(
             acos(
@@ -316,6 +389,131 @@ class PoseMetrics {
             )
         ).toFloat()
     }
+
+    // ============================================================
+    // 3. 당김팔 정렬 오차
+    // ============================================================
+
+    private fun calculateForearmHorizontalError(
+        detection: RawPersonDetection,
+        elbowIndex: Int,
+        wristIndex: Int
+    ): Float? {
+
+        val elbow =
+            point(
+                detection,
+                elbowIndex
+            ) ?: return null
+
+        val wrist =
+            point(
+                detection,
+                wristIndex
+            ) ?: return null
+
+        val dx =
+            wrist.x -
+                    elbow.x
+
+        val dy =
+            wrist.y -
+                    elbow.y
+
+        if (
+            abs(dx) <
+            0.0001f &&
+            abs(dy) <
+            0.0001f
+        ) {
+            return null
+        }
+
+        /*
+         * 수평선을 0°로 둔다.
+         *
+         * --------  0°
+         *
+         *    /      약 30°
+         *
+         *    |      90°
+         */
+        var degree =
+            abs(
+                Math.toDegrees(
+                    atan2(
+                        dy.toDouble(),
+                        dx.toDouble()
+                    )
+                ).toFloat()
+            )
+
+        /*
+         * 진행 방향이 왼쪽이어도
+         * 수평 오차는 동일해야 하므로
+         * 0~90° 범위로 변환.
+         */
+        if (
+            degree >
+            90f
+        ) {
+
+            degree =
+                180f -
+                        degree
+        }
+
+        return abs(
+            degree
+        )
+    }
+
+    // ============================================================
+    // Shoulder Tilt - Debug
+    // ============================================================
+
+    private fun calculateShoulderTilt(
+        detection: RawPersonDetection
+    ): Float? {
+
+        val left =
+            point(
+                detection,
+                5
+            ) ?: return null
+
+        val right =
+            point(
+                detection,
+                6
+            ) ?: return null
+
+        val dx =
+            right.x -
+                    left.x
+
+        if (
+            abs(dx) <
+            0.0001f
+        ) {
+            return null
+        }
+
+        val radians =
+            atan2(
+                left.y -
+                        right.y,
+                abs(dx)
+            )
+
+        return Math.toDegrees(
+            radians.toDouble()
+        ).toFloat()
+    }
+
+    // ============================================================
+    // Utility
+    // ============================================================
 
     private fun point(
         detection: RawPersonDetection,
@@ -334,7 +532,7 @@ class PoseMetrics {
 
         if (
             point.confidence <
-            CONFIDENCE_THRESHOLD
+            KEYPOINT_CONFIDENCE_THRESHOLD
         ) {
             return null
         }

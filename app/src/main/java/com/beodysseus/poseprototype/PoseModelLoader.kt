@@ -2,18 +2,44 @@ package com.beodysseus.poseprototype
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.sqrt
+import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.roundToInt
 
-class PoseModelLoader(context: Context) {
+private data class LetterboxResult(
+    val bitmap: Bitmap,
+    val scale: Float,
+    val padX: Float,
+    val padY: Float,
+    val sourceWidth: Int,
+    val sourceHeight: Int
+)
+
+class PoseModelLoader(
+    context: Context
+) {
+
+    companion object {
+        private const val TAG = "BeOdysseusPose"
+
+        private const val INPUT_SIZE = 640
+        private const val OUTPUT_COUNT = 8400
+        private const val OUTPUT_CHANNELS = 56
+
+        private const val PERSON_CONFIDENCE_THRESHOLD = 0.35f
+        private const val NMS_IOU_THRESHOLD = 0.45f
+        private const val MAX_PERSON_COUNT = 10
+    }
 
     private val interpreter: Interpreter
-
-    private val inputWidth = 640
-    private val inputHeight = 640
 
     init {
         val modelBytes = context.assets
@@ -27,214 +53,503 @@ class PoseModelLoader(context: Context) {
         modelBuffer.put(modelBytes)
         modelBuffer.rewind()
 
-        val options = Interpreter.Options()
-        options.setNumThreads(4)
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+        }
 
-        interpreter = Interpreter(modelBuffer, options)
-
-        Log.d("BeOdysseusPose", "MODEL LOADED")
-
-        Log.d(
-            "BeOdysseusPose",
-            "Input: ${interpreter.getInputTensor(0).shape().contentToString()}"
+        interpreter = Interpreter(
+            modelBuffer,
+            options
         )
 
-        Log.d(
-            "BeOdysseusPose",
-            "Output: ${interpreter.getOutputTensor(0).shape().contentToString()}"
+        Log.d(TAG, "YOLO26 POSE MODEL LOADED")
+    }
+
+    fun runInference(
+        sourceBitmap: Bitmap
+    ): List<RawPersonDetection> {
+
+        val letterbox = createLetterbox(
+            sourceBitmap
+        )
+
+        try {
+            val inputBuffer = createInputBuffer(
+                letterbox.bitmap
+            )
+
+            val output = Array(1) {
+                Array(OUTPUT_CHANNELS) {
+                    FloatArray(OUTPUT_COUNT)
+                }
+            }
+
+            interpreter.run(
+                inputBuffer,
+                output
+            )
+
+            val detections = extractDetections(
+                output,
+                letterbox
+            )
+
+            return applyNms(
+                detections
+            )
+
+        } finally {
+            letterbox.bitmap.recycle()
+        }
+    }
+
+    // ============================================================
+    // Letterbox
+    // ============================================================
+
+    private fun createLetterbox(
+        source: Bitmap
+    ): LetterboxResult {
+
+        val sourceWidth = source.width
+        val sourceHeight = source.height
+
+        val scale = min(
+            INPUT_SIZE.toFloat() / sourceWidth,
+            INPUT_SIZE.toFloat() / sourceHeight
+        )
+
+        val scaledWidth = (
+                sourceWidth * scale
+                ).roundToInt()
+
+        val scaledHeight = (
+                sourceHeight * scale
+                ).roundToInt()
+
+        val padX = (
+                INPUT_SIZE - scaledWidth
+                ) / 2f
+
+        val padY = (
+                INPUT_SIZE - scaledHeight
+                ) / 2f
+
+        val outputBitmap = Bitmap.createBitmap(
+            INPUT_SIZE,
+            INPUT_SIZE,
+            Bitmap.Config.ARGB_8888
+        )
+
+        val canvas = Canvas(
+            outputBitmap
+        )
+
+        canvas.drawColor(
+            Color.BLACK
+        )
+
+        val paint = Paint(
+            Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG
+        )
+
+        val destination = RectF(
+            padX,
+            padY,
+            padX + scaledWidth,
+            padY + scaledHeight
+        )
+
+        canvas.drawBitmap(
+            source,
+            null,
+            destination,
+            paint
+        )
+
+        return LetterboxResult(
+            bitmap = outputBitmap,
+            scale = scale,
+            padX = padX,
+            padY = padY,
+            sourceWidth = sourceWidth,
+            sourceHeight = sourceHeight
         )
     }
 
-    fun runTestInference(bitmap: Bitmap) {
+    // ============================================================
+    // Model Input
+    // ============================================================
 
-        val resizedBitmap = Bitmap.createScaledBitmap(
-            bitmap,
-            inputWidth,
-            inputHeight,
-            true
+    private fun createInputBuffer(
+        bitmap: Bitmap
+    ): ByteBuffer {
+
+        val pixels = IntArray(
+            INPUT_SIZE * INPUT_SIZE
         )
 
-        val pixels = IntArray(inputWidth * inputHeight)
-
-        resizedBitmap.getPixels(
+        bitmap.getPixels(
             pixels,
             0,
-            inputWidth,
+            INPUT_SIZE,
             0,
             0,
-            inputWidth,
-            inputHeight
+            INPUT_SIZE,
+            INPUT_SIZE
         )
 
         val inputBuffer = ByteBuffer
             .allocateDirect(
-                1 * 3 * inputWidth * inputHeight * 4
+                1 * 3 * INPUT_SIZE * INPUT_SIZE * 4
             )
-            .order(ByteOrder.nativeOrder())
+            .order(
+                ByteOrder.nativeOrder()
+            )
 
-        // R 채널
+        // R
         for (pixel in pixels) {
             val r = (pixel shr 16) and 0xFF
-            inputBuffer.putFloat(r / 255.0f)
+            inputBuffer.putFloat(
+                r / 255f
+            )
         }
 
-        // G 채널
+        // G
         for (pixel in pixels) {
             val g = (pixel shr 8) and 0xFF
-            inputBuffer.putFloat(g / 255.0f)
+            inputBuffer.putFloat(
+                g / 255f
+            )
         }
 
-        // B 채널
+        // B
         for (pixel in pixels) {
             val b = pixel and 0xFF
-            inputBuffer.putFloat(b / 255.0f)
+            inputBuffer.putFloat(
+                b / 255f
+            )
         }
 
         inputBuffer.rewind()
 
-        // 모델 출력: [1, 56, 8400]
-        val output =
-            Array(1) {
-                Array(56) {
-                    FloatArray(8400)
+        return inputBuffer
+    }
+
+    // ============================================================
+    // YOLO Output
+    // ============================================================
+
+    private fun extractDetections(
+        output: Array<Array<FloatArray>>,
+        letterbox: LetterboxResult
+    ): List<RawPersonDetection> {
+
+        val detections = mutableListOf<RawPersonDetection>()
+
+        for (i in 0 until OUTPUT_COUNT) {
+
+            val confidence = output[0][4][i]
+
+            if (
+                confidence <
+                PERSON_CONFIDENCE_THRESHOLD
+            ) {
+                continue
+            }
+
+            val rawCenterX = modelCoordinateToPixel(
+                output[0][0][i]
+            )
+
+            val rawCenterY = modelCoordinateToPixel(
+                output[0][1][i]
+            )
+
+            val rawWidth = modelSizeToPixel(
+                output[0][2][i]
+            )
+
+            val rawHeight = modelSizeToPixel(
+                output[0][3][i]
+            )
+
+            val sourceCenterX = (
+                    (rawCenterX - letterbox.padX) /
+                            letterbox.scale
+                    ) / letterbox.sourceWidth
+
+            val sourceCenterY = (
+                    (rawCenterY - letterbox.padY) /
+                            letterbox.scale
+                    ) / letterbox.sourceHeight
+
+            val sourceWidth = (
+                    rawWidth /
+                            letterbox.scale
+                    ) / letterbox.sourceWidth
+
+            val sourceHeight = (
+                    rawHeight /
+                            letterbox.scale
+                    ) / letterbox.sourceHeight
+
+            var left = sourceCenterX - sourceWidth / 2f
+            var right = sourceCenterX + sourceWidth / 2f
+
+            var top = sourceCenterY - sourceHeight / 2f
+            var bottom = sourceCenterY + sourceHeight / 2f
+
+            left = left.coerceIn(
+                0f,
+                1f
+            )
+
+            right = right.coerceIn(
+                0f,
+                1f
+            )
+
+            top = top.coerceIn(
+                0f,
+                1f
+            )
+
+            bottom = bottom.coerceIn(
+                0f,
+                1f
+            )
+
+            val clippedWidth = right - left
+            val clippedHeight = bottom - top
+
+            if (
+                clippedWidth <= 0.02f ||
+                clippedHeight <= 0.05f
+            ) {
+                continue
+            }
+
+            val keypoints = ArrayList<PoseKeyPoint>(
+                17
+            )
+
+            for (
+            keyPointIndex in 0 until 17
+            ) {
+
+                val base = 5 + keyPointIndex * 3
+
+                val modelX = modelCoordinateToPixel(
+                    output[0][base][i]
+                )
+
+                val modelY = modelCoordinateToPixel(
+                    output[0][base + 1][i]
+                )
+
+                val keyPointConfidence =
+                    output[0][base + 2][i]
+
+                val sourceX = (
+                        (modelX - letterbox.padX) /
+                                letterbox.scale
+                        ) / letterbox.sourceWidth
+
+                val sourceY = (
+                        (modelY - letterbox.padY) /
+                                letterbox.scale
+                        ) / letterbox.sourceHeight
+
+                keypoints.add(
+                    PoseKeyPoint(
+                        x = sourceX,
+                        y = sourceY,
+                        confidence = keyPointConfidence
+                    )
+                )
+            }
+
+            detections.add(
+                RawPersonDetection(
+                    boundingBox = PoseBoundingBox(
+                        centerX = (left + right) / 2f,
+                        centerY = (top + bottom) / 2f,
+                        width = clippedWidth,
+                        height = clippedHeight
+                    ),
+                    keypoints = keypoints,
+                    personConfidence = confidence
+                )
+            )
+        }
+
+        return detections
+    }
+
+    private fun modelCoordinateToPixel(
+        value: Float
+    ): Float {
+
+        return if (
+            abs(value) <= 2f
+        ) {
+            value * INPUT_SIZE
+        } else {
+            value
+        }
+    }
+
+    private fun modelSizeToPixel(
+        value: Float
+    ): Float {
+
+        return if (
+            abs(value) <= 2f
+        ) {
+            value * INPUT_SIZE
+        } else {
+            value
+        }
+    }
+
+    // ============================================================
+    // NMS
+    // ============================================================
+
+    private fun applyNms(
+        detections: List<RawPersonDetection>
+    ): List<RawPersonDetection> {
+
+        if (
+            detections.isEmpty()
+        ) {
+            return emptyList()
+        }
+
+        val sorted = detections.sortedByDescending {
+            it.personConfidence
+        }
+
+        val selected =
+            mutableListOf<RawPersonDetection>()
+
+        for (candidate in sorted) {
+
+            var suppressed = false
+
+            for (existing in selected) {
+
+                if (
+                    calculateIoU(
+                        candidate.boundingBox,
+                        existing.boundingBox
+                    ) > NMS_IOU_THRESHOLD
+                ) {
+                    suppressed = true
+                    break
                 }
             }
 
-        val startTime = System.currentTimeMillis()
+            if (
+                !suppressed
+            ) {
+                selected.add(
+                    candidate
+                )
+            }
 
-        interpreter.run(
-            inputBuffer,
-            output
-        )
-
-        val inferenceTime =
-            System.currentTimeMillis() - startTime
-
-        Log.d(
-            "BeOdysseusPose",
-            "Inference time: ${inferenceTime} ms"
-        )
-
-        // =========================
-        // 가장 confidence 높은 사람 찾기
-        // =========================
-
-        var bestIndex = -1
-        var bestConfidence = 0f
-
-        for (i in 0 until 8400) {
-
-            val confidence =
-                output[0][4][i]
-
-            if (confidence > bestConfidence) {
-                bestConfidence = confidence
-                bestIndex = i
+            if (
+                selected.size >=
+                MAX_PERSON_COUNT
+            ) {
+                break
             }
         }
 
-        if (
-            bestIndex == -1 ||
-            bestConfidence < 0.25f
-        ) {
+        return selected
+    }
 
-            Log.d(
-                "BeOdysseusPose",
-                "NO PERSON DETECTED"
-            )
+    private fun calculateIoU(
+        first: PoseBoundingBox,
+        second: PoseBoundingBox
+    ): Float {
 
-            resizedBitmap.recycle()
-            return
-        }
+        val firstLeft =
+            first.centerX - first.width / 2f
 
-        // =========================
-        // COCO Pose Keypoints
-        // 5 = Left Shoulder
-        // 6 = Right Shoulder
-        // =========================
+        val firstRight =
+            first.centerX + first.width / 2f
 
-        val leftShoulderIndex = 5
-        val rightShoulderIndex = 6
+        val firstTop =
+            first.centerY - first.height / 2f
 
-        val leftBase =
-            5 + (leftShoulderIndex * 3)
+        val firstBottom =
+            first.centerY + first.height / 2f
 
-        val rightBase =
-            5 + (rightShoulderIndex * 3)
+        val secondLeft =
+            second.centerX - second.width / 2f
 
-        val leftShoulderX =
-            output[0][leftBase][bestIndex]
+        val secondRight =
+            second.centerX + second.width / 2f
 
-        val leftShoulderY =
-            output[0][leftBase + 1][bestIndex]
+        val secondTop =
+            second.centerY - second.height / 2f
 
-        val leftShoulderConfidence =
-            output[0][leftBase + 2][bestIndex]
+        val secondBottom =
+            second.centerY + second.height / 2f
 
-        val rightShoulderX =
-            output[0][rightBase][bestIndex]
-
-        val rightShoulderY =
-            output[0][rightBase + 1][bestIndex]
-
-        val rightShoulderConfidence =
-            output[0][rightBase + 2][bestIndex]
-
-        Log.d(
-            "BeOdysseusPose",
-            "PERSON confidence=$bestConfidence"
+        val intersectionLeft = maxOf(
+            firstLeft,
+            secondLeft
         )
 
-        Log.d(
-            "BeOdysseusPose",
-            "LEFT SHOULDER x=$leftShoulderX y=$leftShoulderY conf=$leftShoulderConfidence"
+        val intersectionRight = minOf(
+            firstRight,
+            secondRight
         )
 
-        Log.d(
-            "BeOdysseusPose",
-            "RIGHT SHOULDER x=$rightShoulderX y=$rightShoulderY conf=$rightShoulderConfidence"
+        val intersectionTop = maxOf(
+            firstTop,
+            secondTop
         )
 
-        // =========================
-        // Shoulder Tilt 계산
-        // =========================
+        val intersectionBottom = minOf(
+            firstBottom,
+            secondBottom
+        )
 
-        val dx =
-            rightShoulderX - leftShoulderX
+        val intersectionWidth = maxOf(
+            0f,
+            intersectionRight - intersectionLeft
+        )
 
-        val dy =
-            rightShoulderY - leftShoulderY
+        val intersectionHeight = maxOf(
+            0f,
+            intersectionBottom - intersectionTop
+        )
 
-        val shoulderWidth =
-            sqrt(
-                dx * dx +
-                        dy * dy
-            )
+        val intersectionArea =
+            intersectionWidth * intersectionHeight
+
+        val firstArea =
+            first.width * first.height
+
+        val secondArea =
+            second.width * second.height
+
+        val union =
+            firstArea +
+                    secondArea -
+                    intersectionArea
 
         if (
-            leftShoulderConfidence >= 0.5f &&
-            rightShoulderConfidence >= 0.5f &&
-            shoulderWidth > 0f
+            union <= 0f
         ) {
-
-            val shoulderTilt =
-                (leftShoulderY - rightShoulderY) /
-                        shoulderWidth
-
-            Log.d(
-                "BeOdysseusPose",
-                "SHOULDER TILT = $shoulderTilt"
-            )
-
-        } else {
-
-            Log.d(
-                "BeOdysseusPose",
-                "SHOULDER NOT RELIABLE"
-            )
+            return 0f
         }
 
-        resizedBitmap.recycle()
+        return intersectionArea / union
     }
 
     fun close() {

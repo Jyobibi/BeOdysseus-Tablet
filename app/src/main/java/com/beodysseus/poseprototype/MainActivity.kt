@@ -1,6 +1,20 @@
 package com.beodysseus.poseprototype
 
 import android.Manifest
+import android.graphics.Color
+import android.widget.Button
+import android.widget.EditText
+import com.beodysseus.poseprototype.network.PairingManager
+import android.content.Intent
+import com.beodysseus.poseprototype.result.FinalPostureResultCalculator
+import com.beodysseus.poseprototype.network.UdpReceiver
+import com.beodysseus.poseprototype.network.NetworkMessageHandler
+import com.beodysseus.poseprototype.result.PostureDataCollector
+import com.beodysseus.poseprototype.stage.StageManager
+import com.beodysseus.poseprototype.tts.PostureTtsManager
+import com.beodysseus.poseprototype.feedback.PostureStatus
+import com.beodysseus.poseprototype.feedback.PostureFeedbackEvaluator
+import com.beodysseus.poseprototype.feedback.PostureWarningTracker
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
@@ -9,7 +23,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -65,6 +78,24 @@ class MainActivity :
             10
     }
 
+    private val pairingManager = PairingManager()
+
+    private lateinit var pairingCodeEditText: EditText
+    private lateinit var pairingButton: Button
+    private lateinit var pairingStatusText: TextView
+
+    private var receivedPairingCode: String? = null
+
+    private lateinit var stageStatusText: TextView
+
+    private val finalPostureResultCalculator =
+        FinalPostureResultCalculator()
+
+    private val networkMessageHandler =
+        NetworkMessageHandler()
+
+    private lateinit var udpReceiver: UdpReceiver
+
     private lateinit var previewView:
             PreviewView
 
@@ -100,6 +131,26 @@ class MainActivity :
 
     private val poseMetrics =
         PoseMetrics()
+
+    private val postureFeedbackEvaluator =
+        PostureFeedbackEvaluator()
+
+    private val bodyWarningTracker =
+        PostureWarningTracker()
+
+    private val bowWarningTracker =
+        PostureWarningTracker()
+
+    private val drawWarningTracker =
+        PostureWarningTracker()
+
+    private lateinit var postureTtsManager: PostureTtsManager
+
+    private val stageManager =
+        StageManager()
+
+    private val postureDataCollector =
+        PostureDataCollector()
 
     private var lastInferenceTime =
         0L
@@ -170,6 +221,142 @@ class MainActivity :
             savedInstanceState
         )
 
+        postureTtsManager =
+            PostureTtsManager(this)
+
+        udpReceiver =
+            UdpReceiver { message ->
+
+                val event =
+                    networkMessageHandler.parse(message)
+
+                runOnUiThread {
+
+                    when (event?.type) {
+
+                        "GAME_START" -> {
+                            stageManager.reset()
+                            postureDataCollector.reset()
+
+                            stageStatusText.text =
+                                "USER 01  ·  STAGE 준비"
+                        }
+
+                        "STAGE_START" -> {
+                            event.stage?.let { stageNumber ->
+
+                                stageManager.startStage(stageNumber)
+
+                                bodyWarningTracker.reset()
+                                bowWarningTracker.reset()
+                                drawWarningTracker.reset()
+
+                                stageStatusText.text =
+                                    "USER 01  ·  STAGE ${stageNumber}  ·  MEASURING"
+                            }
+                        }
+
+                        "STAGE_END" -> {
+                            stageManager.endStage()
+
+                            bodyWarningTracker.reset()
+                            bowWarningTracker.reset()
+                            drawWarningTracker.reset()
+
+                            stageStatusText.text =
+                                "USER 01  ·  STAGE 준비"
+                        }
+
+                        "GAME_END" -> {
+
+                            stageManager.endStage()
+
+                            stageStatusText.text =
+                                "USER 01  ·  측정 완료"
+
+                            bodyWarningTracker.reset()
+                            bowWarningTracker.reset()
+                            drawWarningTracker.reset()
+
+                            val finalResult =
+                                finalPostureResultCalculator.calculate(
+                                    postureDataCollector
+                                )
+
+                            if (finalResult != null) {
+
+                                Log.d(
+                                    TAG,
+                                    "FINAL RESULT | " +
+                                            "overall=${finalResult.overallScore}% | " +
+                                            "body=${finalResult.bodyScore}% | " +
+                                            "bow=${finalResult.bowArmScore}% | " +
+                                            "draw=${finalResult.drawArmScore}% | " +
+                                            "stage1=${finalResult.stage1Score}% | " +
+                                            "stage2=${finalResult.stage2Score}% | " +
+                                            "stage3=${finalResult.stage3Score}%"
+                                )
+
+                                val intent =
+                                    Intent(
+                                        this@MainActivity,
+                                        ResultActivity::class.java
+                                    ).apply {
+
+                                        putExtra(
+                                            "overallScore",
+                                            finalResult.overallScore
+                                        )
+
+                                        putExtra(
+                                            "bodyScore",
+                                            finalResult.bodyScore
+                                        )
+
+                                        putExtra(
+                                            "bowArmScore",
+                                            finalResult.bowArmScore
+                                        )
+
+                                        putExtra(
+                                            "drawArmScore",
+                                            finalResult.drawArmScore
+                                        )
+
+                                        putExtra(
+                                            "stage1Score",
+                                            finalResult.stage1Score ?: -1
+                                        )
+
+                                        putExtra(
+                                            "stage2Score",
+                                            finalResult.stage2Score ?: -1
+                                        )
+
+                                        putExtra(
+                                            "stage3Score",
+                                            finalResult.stage3Score ?: -1
+                                        )
+                                    }
+
+                                udpReceiver.stop()
+
+                                startActivity(intent)
+
+                            } else {
+
+                                Log.d(
+                                    TAG,
+                                    "FINAL RESULT | 측정 데이터 없음"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+        udpReceiver.start()
+
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         )
@@ -177,6 +364,50 @@ class MainActivity :
         setContentView(
             R.layout.activity_main
         )
+
+        stageStatusText =
+            findViewById(R.id.stageStatusText)
+
+        pairingCodeEditText =
+            findViewById(R.id.pairingCodeEditText)
+        pairingCodeEditText =
+            findViewById(R.id.pairingCodeEditText)
+
+        pairingButton =
+            findViewById(R.id.pairingButton)
+
+        pairingStatusText =
+            findViewById(R.id.pairingStatusText)
+
+        pairingButton.setOnClickListener {
+
+            val enteredCode =
+                pairingCodeEditText.text
+                    .toString()
+                    .trim()
+
+            val receivedCode =
+                receivedPairingCode
+
+            if (receivedCode == null) {
+                pairingStatusText.text = "스마트폰 연결 대기"
+                return@setOnClickListener
+            }
+
+            val success =
+                pairingManager.pair(
+                    receivedCode = receivedCode,
+                    enteredCode = enteredCode
+                )
+
+            if (success) {
+                pairingStatusText.text = "연결 완료"
+                pairingCodeEditText.isEnabled = false
+                pairingButton.isEnabled = false
+            } else {
+                pairingStatusText.text = "코드 불일치"
+            }
+        }
 
         previewView =
             findViewById(
@@ -1173,13 +1404,13 @@ class MainActivity :
         pose: TrackedPose?
     ) {
 
-        if (
-            pose ==
-            null
-        ) {
+        if (pose == null) {
+
+            bodyWarningTracker.reset()
+            bowWarningTracker.reset()
+            drawWarningTracker.reset()
 
             clearMetricUI()
-
             return
         }
 
@@ -1187,22 +1418,93 @@ class MainActivity :
             pose.bodyLeanDegree
 
         val bowError =
-            pose
-                .bowArmStraightnessErrorDegree
+            pose.bowArmStraightnessErrorDegree
 
         val drawError =
             pose.drawArmAlignmentErrorDegree
 
+        val feedback =
+            postureFeedbackEvaluator.evaluate(
+                bodyLeanDegree = bodyLean,
+                bowArmStraightnessErrorDegree = bowError,
+                drawArmAlignmentErrorDegree = drawError
+            )
+
+        // Stage 진행 중일 때만 자세 데이터를 누적
+        if (stageManager.isStageActive) {
+            postureDataCollector.addFrame(
+                stageNumber = stageManager.currentStage,
+                feedback = feedback
+            )
+        }
+
+        Log.d(
+            TAG,
+            "POSTURE FEEDBACK | " +
+                    "body=${feedback.bodyStatus}, " +
+                    "bow=${feedback.bowArmStatus}, " +
+                    "draw=${feedback.drawArmStatus}"
+        )
+
+        val currentTime =
+            SystemClock.elapsedRealtime()
+
+        val bodyWarningReady =
+            bodyWarningTracker.update(
+                feedback.bodyStatus,
+                currentTime
+            )
+
+        val bowWarningReady =
+            bowWarningTracker.update(
+                feedback.bowArmStatus,
+                currentTime
+            )
+
+        val drawWarningReady =
+            drawWarningTracker.update(
+                feedback.drawArmStatus,
+                currentTime
+            )
+
+//        if (stageManager.isStageActive) {
+
+            when {
+                bodyWarningReady -> {
+                    postureTtsManager.speak(
+                        "상체 자세를 바로잡아주세요."
+                    )
+                }
+
+                bowWarningReady -> {
+                    postureTtsManager.speak(
+                        "왼쪽팔을 곧게 펴주세요."
+                    )
+                }
+
+                drawWarningReady -> {
+                    postureTtsManager.speak(
+                        "오른쪽팔을 수평으로 유지해주세요."
+                    )
+                }
+            }
+//        }
+
         bodyLeanText.text =
-            if (
-                bodyLean !=
-                null
-            ) {
+            if (bodyLean != null) {
+
+                val statusText =
+                    when (feedback.bodyStatus) {
+                        PostureStatus.NORMAL -> "✓ 정상"
+                        PostureStatus.WARNING -> "! 주의"
+                        null -> ""
+                    }
 
                 String.format(
                     Locale.US,
-                    "상체 기울기: %.1f°",
-                    bodyLean
+                    "상체 기울기: %.1f°  %s",
+                    bodyLean,
+                    statusText
                 )
 
             } else {
@@ -1211,15 +1513,20 @@ class MainActivity :
             }
 
         bowArmText.text =
-            if (
-                bowError !=
-                null
-            ) {
+            if (bowError != null) {
+
+                val statusText =
+                    when (feedback.bowArmStatus) {
+                        PostureStatus.NORMAL -> "✓ 정상"
+                        PostureStatus.WARNING -> "! 주의"
+                        null -> ""
+                    }
 
                 String.format(
                     Locale.US,
-                    "활팔 기준 오차: %.1f°",
-                    bowError
+                    "활팔 기준 오차: %.1f°  %s",
+                    bowError,
+                    statusText
                 )
 
             } else {
@@ -1228,21 +1535,57 @@ class MainActivity :
             }
 
         drawArmText.text =
-            if (
-                drawError !=
-                null
-            ) {
+            if (drawError != null) {
+
+                val statusText =
+                    when (feedback.drawArmStatus) {
+                        PostureStatus.NORMAL -> "✓ 정상"
+                        PostureStatus.WARNING -> "! 주의"
+                        null -> ""
+                    }
 
                 String.format(
                     Locale.US,
-                    "당김팔 정렬 오차: %.1f°",
-                    drawError
+                    "당김팔 정렬 오차: %.1f°  %s",
+                    drawError,
+                    statusText
                 )
 
             } else {
 
                 "당김팔 정렬 오차: --"
             }
+
+        updateMetricCardColor(
+            bodyLeanText,
+            feedback.bodyStatus
+        )
+
+        updateMetricCardColor(
+            bowArmText,
+            feedback.bowArmStatus
+        )
+
+        updateMetricCardColor(
+            drawArmText,
+            feedback.drawArmStatus
+        )
+    }
+
+    private fun updateMetricCardColor(
+        view: TextView,
+        status: PostureStatus?
+    ) {
+        val color =
+            when (status) {
+                PostureStatus.NORMAL -> "#1F5C46"
+                PostureStatus.WARNING -> "#7F3D3D"
+                null -> "#263244"
+            }
+
+        view.setBackgroundColor(
+            Color.parseColor(color)
+        )
     }
 
     private fun clearMetricUI() {
@@ -1255,6 +1598,10 @@ class MainActivity :
 
         drawArmText.text =
             "당김팔 정렬 오차: --"
+
+        updateMetricCardColor(bodyLeanText, null)
+        updateMetricCardColor(bowArmText, null)
+        updateMetricCardColor(drawArmText, null)
     }
 
     // ============================================================
@@ -1293,10 +1640,14 @@ class MainActivity :
 
     override fun onDestroy() {
 
-        super.onDestroy()
+        udpReceiver.stop()
+
+        postureTtsManager.shutdown()
 
         cameraExecutor.shutdown()
 
         poseModelLoader.close()
+
+        super.onDestroy()
     }
 }

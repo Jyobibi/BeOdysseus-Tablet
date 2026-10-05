@@ -80,23 +80,16 @@ class PoseMetrics {
          * 당김팔은 elbow angle 자체가 아니라
          * Elbow → Wrist 선의 수평 정렬 오차를 사용.
          */
+        /*
+ * 활팔과 당김팔의 상대적인 방향 차이를 계산.
+ *
+ * 몬스터가 위/아래에 있어
+ * 양팔이 함께 기울어져도 서로 정렬되어 있으면 정상.
+ */
         val drawArmAlignmentError =
-            if (RIGHT_HANDED) {
-
-                calculateForearmHorizontalError(
-                    detection,
-                    elbowIndex = 8,
-                    wristIndex = 10
-                )
-
-            } else {
-
-                calculateForearmHorizontalError(
-                    detection,
-                    elbowIndex = 7,
-                    wristIndex = 9
-                )
-            }
+            calculateArmRelativeAlignmentError(
+                detection
+            )
 
         return PoseMetricsResult(
 
@@ -394,78 +387,81 @@ class PoseMetrics {
     // 3. 당김팔 정렬 오차
     // ============================================================
 
-    private fun calculateForearmHorizontalError(
-        detection: RawPersonDetection,
-        elbowIndex: Int,
-        wristIndex: Int
+    private fun calculateArmRelativeAlignmentError(
+        detection: RawPersonDetection
     ): Float? {
 
-        val elbow =
+        val bowShoulderIndex =
+            if (RIGHT_HANDED) 5 else 6
+
+        val bowWristIndex =
+            if (RIGHT_HANDED) 9 else 10
+
+        val drawElbowIndex =
+            if (RIGHT_HANDED) 8 else 7
+
+        val drawWristIndex =
+            if (RIGHT_HANDED) 10 else 9
+
+        val bowShoulder =
             point(
                 detection,
-                elbowIndex
+                bowShoulderIndex
             ) ?: return null
 
-        val wrist =
+        val bowWrist =
             point(
                 detection,
-                wristIndex
+                bowWristIndex
             ) ?: return null
 
-        val dx =
-            wrist.x -
-                    elbow.x
+        val drawElbow =
+            point(
+                detection,
+                drawElbowIndex
+            ) ?: return null
 
-        val dy =
-            wrist.y -
-                    elbow.y
+        val drawWrist =
+            point(
+                detection,
+                drawWristIndex
+            ) ?: return null
 
-        if (
-            abs(dx) <
-            0.0001f &&
-            abs(dy) <
-            0.0001f
-        ) {
-            return null
-        }
+        // 활팔 방향
+        val bowAngle =
+            Math.toDegrees(
+                atan2(
+                    (bowWrist.y - bowShoulder.y).toDouble(),
+                    (bowWrist.x - bowShoulder.x).toDouble()
+                )
+            ).toFloat()
 
-        /*
-         * 수평선을 0°로 둔다.
-         *
-         * --------  0°
-         *
-         *    /      약 30°
-         *
-         *    |      90°
-         */
-        var degree =
+        // 당김팔 방향
+        val drawAngle =
+            Math.toDegrees(
+                atan2(
+                    (drawWrist.y - drawElbow.y).toDouble(),
+                    (drawWrist.x - drawElbow.x).toDouble()
+                )
+            ).toFloat()
+
+        var difference =
             abs(
-                Math.toDegrees(
-                    atan2(
-                        dy.toDouble(),
-                        dx.toDouble()
-                    )
-                ).toFloat()
+                bowAngle - drawAngle
             )
 
-        /*
-         * 진행 방향이 왼쪽이어도
-         * 수평 오차는 동일해야 하므로
-         * 0~90° 범위로 변환.
-         */
-        if (
-            degree >
-            90f
-        ) {
-
-            degree =
-                180f -
-                        degree
+        // 선의 방향이 반대여도 같은 정렬로 취급
+        if (difference > 180f) {
+            difference =
+                360f - difference
         }
 
-        return abs(
-            degree
-        )
+        if (difference > 90f) {
+            difference =
+                180f - difference
+        }
+
+        return abs(difference)
     }
 
     // ============================================================

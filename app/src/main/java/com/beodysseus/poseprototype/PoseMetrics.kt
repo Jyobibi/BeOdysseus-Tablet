@@ -129,7 +129,7 @@ class PoseMetrics {
              * drawArmAlignmentErrorDegree로
              * 이름을 한 번에 변경할 예정.
              */
-            drawArmElbowAngleDegree =
+            drawArmAlignmentErrorDegree =
                 drawArmAlignmentError,
 
             bowArmSide =

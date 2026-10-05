@@ -618,8 +618,8 @@ class MainActivity :
                     bowArmStraightnessErrorDegree =
                         calibratedBowError,
 
-                    drawArmElbowAngleDegree =
-                        metrics.drawArmElbowAngleDegree,
+                    drawArmAlignmentErrorDegree =
+                        metrics.drawArmAlignmentErrorDegree,
 
                     bowArmSide =
                         metrics.bowArmSide,
@@ -1191,7 +1191,7 @@ class MainActivity :
                 .bowArmStraightnessErrorDegree
 
         val drawError =
-            pose.drawArmElbowAngleDegree
+            pose.drawArmAlignmentErrorDegree
 
         bodyLeanText.text =
             if (

@@ -24,9 +24,6 @@ class ResultActivity : AppCompatActivity() {
         val bowArmScore =
             intent.getIntExtra("bowArmScore", 0)
 
-        val drawArmScore =
-            intent.getIntExtra("drawArmScore", 0)
-
         val stage1Score =
             intent.getIntExtra("stage1Score", -1)
 
@@ -65,11 +62,6 @@ class ResultActivity : AppCompatActivity() {
             R.id.bowArmScoreText
         ).text =
             "• 활팔 펴짐                 ${bowArmScore}점"
-
-        findViewById<TextView>(
-            R.id.drawArmScoreText
-        ).text =
-            "• 양팔 정렬                 ${drawArmScore}점"
 
         // Stage별 점수
         findViewById<TextView>(

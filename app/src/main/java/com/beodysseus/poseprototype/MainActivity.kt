@@ -1,11 +1,14 @@
 package com.beodysseus.poseprototype
 
 import android.Manifest
+import com.beodysseus.poseprototype.network.NetworkConstants
+import com.beodysseus.poseprototype.network.UdpSender
 import android.graphics.Color
 import android.widget.Button
 import android.widget.EditText
 import com.beodysseus.poseprototype.network.PairingManager
 import android.content.Intent
+import com.beodysseus.poseprototype.network.NetworkMessageBuilder
 import com.beodysseus.poseprototype.result.FinalPostureResultCalculator
 import com.beodysseus.poseprototype.network.UdpReceiver
 import com.beodysseus.poseprototype.network.NetworkMessageHandler
@@ -78,13 +81,27 @@ class MainActivity :
             10
     }
 
+    private var correctPostureStartTime = 0L
+    private val CORRECT_POSTURE_DURATION_MS = 5_000L
+
     private val pairingManager = PairingManager()
 
     private lateinit var pairingCodeEditText: EditText
     private lateinit var pairingButton: Button
     private lateinit var pairingStatusText: TextView
 
+    private val processedSeqs = mutableSetOf<Int>()
+
     private var receivedPairingCode: String? = null
+
+    private var receivedSession: String? = null
+    private var phoneIp: String? = null
+    private var phonePort: Int = NetworkConstants.PHONE_PORT
+    private val udpSender = UdpSender()
+    private var outgoingSeq = 1
+
+    private var cameraPermissionGranted = false
+    private var cameraStarted = false
 
     private lateinit var stageStatusText: TextView
 
@@ -109,9 +126,6 @@ class MainActivity :
             TextView
 
     private lateinit var bowArmText:
-            TextView
-
-    private lateinit var drawArmText:
             TextView
 
     private lateinit var retryUserButton:
@@ -168,42 +182,15 @@ class MainActivity :
     private var sideProfileRefreshPending =
         false
 
-    // ============================================================
-    // 활팔 Calibration
-    // ============================================================
-
-    /*
-     * 5초 준비시간 마지막 구간의
-     * raw 활팔 오차값 저장.
-     *
-     * 예:
-     * 29, 31, 30, 32...
-     */
-    private val bowCalibrationSamples =
-        mutableListOf<Float>()
-
-    /*
-     * 실제 측정에 사용할 활팔 기준값.
-     *
-     * 예:
-     * YOLO가 곧게 편 팔을 30°로 본다면
-     * baseline = 30°
-     */
-    private var bowArmBaselineError:
-            Float? = null
 
     private val requestCameraPermission =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
 
-            if (
-                granted
-            ) {
+            cameraPermissionGranted = granted
 
-                startCamera()
-
-            } else {
+            if (!granted) {
 
                 Toast.makeText(
                     this,
@@ -225,25 +212,173 @@ class MainActivity :
             PostureTtsManager(this)
 
         udpReceiver =
-            UdpReceiver { message ->
+            UdpReceiver { message, senderIp ->
 
                 val event =
                     networkMessageHandler.parse(message)
 
+                if (event?.type == NetworkConstants.PAIR_OFFER) {
+
+                    receivedPairingCode = event.code
+                    receivedSession = event.session
+                    phoneIp = senderIp
+                    phonePort = event.port ?: NetworkConstants.PHONE_PORT
+
+                    runOnUiThread {
+                        pairingStatusText.text =
+                            "스마트폰 발견 · 4자리 코드를 입력하세요"
+                    }
+
+                    return@UdpReceiver
+                }
+
+                if (event?.type == NetworkConstants.PAIR_CONFIRM) {
+
+                    if (
+                        event.session == receivedSession &&
+                        senderIp == phoneIp
+                    ) {
+                        runOnUiThread {
+
+                            pairingStatusText.text = "연결 완료"
+                            pairingCodeEditText.isEnabled = false
+                            pairingButton.isEnabled = false
+
+                            userStatusText.text =
+                                "사용자를 화면 중앙에 위치해주세요."
+
+                            if (
+                                cameraPermissionGranted &&
+                                !cameraStarted
+                            ) {
+                                cameraStarted = true
+                                startCamera()
+                            }
+                        }
+                    }
+
+                    return@UdpReceiver
+                }
+
+                if (event?.type == NetworkConstants.PING) {
+
+                    // 현재 연결된 폰과 같은 세션의 ping만 허용
+                    if (
+                        event.session == receivedSession &&
+                        senderIp == phoneIp
+                    ) {
+                        Log.d(TAG, "PING received")
+                    }
+
+                    return@UdpReceiver
+                }
+
+                if (event?.type == NetworkConstants.HELLO) {
+
+                    if (
+                        event.session == receivedSession &&
+                        senderIp == phoneIp
+                    ) {
+                        Log.d(TAG, "HELLO received")
+                    }
+
+                    return@UdpReceiver
+                }
+
+                if (event?.type == NetworkConstants.UNPAIR) {
+
+                    if (
+                        event.session == receivedSession &&
+                        senderIp == phoneIp
+                    ) {
+                        pairingManager.reset()
+
+                        receivedPairingCode = null
+                        receivedSession = null
+                        phoneIp = null
+                        phonePort = NetworkConstants.PHONE_PORT
+
+                        synchronized(processedSeqs) {
+                            processedSeqs.clear()
+                        }
+
+                        runOnUiThread {
+                            pairingStatusText.text = "스마트폰 연결 대기"
+                            pairingCodeEditText.text.clear()
+                            pairingCodeEditText.isEnabled = true
+                            pairingButton.isEnabled = true
+                        }
+                    }
+
+                    return@UdpReceiver
+                }
+
                 runOnUiThread {
+// 페어링 완료 후 게임 패킷 처리
+                    if (
+                        event != null &&
+                        event.type in listOf(
+                            NetworkConstants.GAME_START,
+                            NetworkConstants.STAGE_START,
+                            NetworkConstants.SHOT,
+                            NetworkConstants.STAGE_END,
+                            NetworkConstants.GAME_END
+                        )
+                    ) {
+
+                        // 다른 세션의 패킷은 무시
+                        if (event.session != receivedSession) {
+                            return@runOnUiThread
+                        }
+
+                        // ACK는 중복 패킷이어도 다시 전송
+                        val targetIp = phoneIp
+
+                        if (targetIp != null) {
+
+                            val ackMessage =
+                                NetworkMessageBuilder.createAck(
+                                    session = event.session,
+                                    seq = outgoingSeq++,
+                                    ackSeq = event.seq
+                                )
+
+                            udpSender.send(
+                                message = ackMessage,
+                                targetIp = targetIp,
+                                targetPort = phonePort
+                            )
+                        }
+
+                        // 이미 처리한 seq면 게임 로직은 다시 실행하지 않음
+                        synchronized(processedSeqs) {
+                            if (!processedSeqs.add(event.seq)) {
+                                return@runOnUiThread
+                            }
+                        }
+                    }
 
                     when (event?.type) {
 
-                        "GAME_START" -> {
+                        NetworkConstants.GAME_START -> {
                             stageManager.reset()
                             postureDataCollector.reset()
+
+                            synchronized(processedSeqs) {
+                                processedSeqs.clear()
+                                processedSeqs.add(event.seq)
+                            }
 
                             stageStatusText.text =
                                 "USER 01  ·  STAGE 준비"
                         }
 
-                        "STAGE_START" -> {
+                        NetworkConstants.STAGE_START -> {
                             event.stage?.let { stageNumber ->
+
+                                if (stageNumber !in 1..3) {
+                                    return@runOnUiThread
+                                }
 
                                 stageManager.startStage(stageNumber)
 
@@ -256,7 +391,18 @@ class MainActivity :
                             }
                         }
 
-                        "STAGE_END" -> {
+                        NetworkConstants.SHOT -> {
+                            Log.d(
+                                "MainActivity",
+                                "SHOT received: stage=${event.stage}, " +
+                                        "shotIndex=${event.shotIndex}, " +
+                                        "hit=${event.hit}, " +
+                                        "accuracy=${event.accuracy}, " +
+                                        "stability=${event.stability}"
+                            )
+                        }
+
+                        NetworkConstants.STAGE_END -> {
                             stageManager.endStage()
 
                             bodyWarningTracker.reset()
@@ -267,7 +413,9 @@ class MainActivity :
                                 "USER 01  ·  STAGE 준비"
                         }
 
-                        "GAME_END" -> {
+                        NetworkConstants.GAME_END -> {
+
+                            Log.d("MainActivity", "===== GAME_END RECEIVED =====")
 
                             stageManager.endStage()
 
@@ -291,7 +439,6 @@ class MainActivity :
                                             "overall=${finalResult.overallScore}% | " +
                                             "body=${finalResult.bodyScore}% | " +
                                             "bow=${finalResult.bowArmScore}% | " +
-                                            "draw=${finalResult.drawArmScore}% | " +
                                             "stage1=${finalResult.stage1Score}% | " +
                                             "stage2=${finalResult.stage2Score}% | " +
                                             "stage3=${finalResult.stage3Score}%"
@@ -318,10 +465,7 @@ class MainActivity :
                                             finalResult.bowArmScore
                                         )
 
-                                        putExtra(
-                                            "drawArmScore",
-                                            finalResult.drawArmScore
-                                        )
+
 
                                         putExtra(
                                             "stage1Score",
@@ -355,8 +499,6 @@ class MainActivity :
                 }
             }
 
-        udpReceiver.start()
-
         window.addFlags(
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         )
@@ -370,8 +512,6 @@ class MainActivity :
 
         pairingCodeEditText =
             findViewById(R.id.pairingCodeEditText)
-        pairingCodeEditText =
-            findViewById(R.id.pairingCodeEditText)
 
         pairingButton =
             findViewById(R.id.pairingButton)
@@ -382,32 +522,47 @@ class MainActivity :
         pairingButton.setOnClickListener {
 
             val enteredCode =
-                pairingCodeEditText.text
-                    .toString()
-                    .trim()
+                pairingCodeEditText.text.toString().trim()
 
-            val receivedCode =
-                receivedPairingCode
+            val receivedCode = receivedPairingCode
+            val session = receivedSession
+            val targetIp = phoneIp
 
-            if (receivedCode == null) {
+            if (
+                receivedCode == null ||
+                session == null ||
+                targetIp == null
+            ) {
                 pairingStatusText.text = "스마트폰 연결 대기"
                 return@setOnClickListener
             }
 
-            val success =
-                pairingManager.pair(
-                    receivedCode = receivedCode,
-                    enteredCode = enteredCode
+            if (!pairingManager.pair(receivedCode, enteredCode)) {
+                pairingStatusText.text = "코드 불일치"
+                return@setOnClickListener
+            }
+
+            val message =
+                NetworkMessageBuilder.createPairRequest(
+                    code = enteredCode,
+                    session = session,
+                    seq = outgoingSeq++
                 )
 
-            if (success) {
-                pairingStatusText.text = "연결 완료"
-                pairingCodeEditText.isEnabled = false
-                pairingButton.isEnabled = false
-            } else {
-                pairingStatusText.text = "코드 불일치"
-            }
+            udpSender.send(
+                message = message,
+                targetIp = targetIp,
+                targetPort = phonePort
+            )
+
+            pairingStatusText.text = "연결 확인 중..."
+
+
         }
+
+        udpReceiver.start()
+
+
 
         previewView =
             findViewById(
@@ -434,10 +589,6 @@ class MainActivity :
                 R.id.bowArmText
             )
 
-        drawArmText =
-            findViewById(
-                R.id.drawArmText
-            )
 
         retryUserButton =
             findViewById(
@@ -477,7 +628,7 @@ class MainActivity :
             PackageManager.PERMISSION_GRANTED
         ) {
 
-            startCamera()
+            cameraPermissionGranted = true
 
         } else {
 
@@ -518,10 +669,6 @@ class MainActivity :
              * 사용자 다시 등록 시
              * 이전 사람의 보정값도 제거.
              */
-            bowCalibrationSamples.clear()
-
-            bowArmBaselineError =
-                null
 
             cameraExecutor.execute {
 
@@ -778,10 +925,6 @@ class MainActivity :
         // 7. 활팔 Calibration sample 수집
         // --------------------------------------------------------
 
-        collectBowCalibrationSample(
-            trackerUpdate.state,
-            smoothedDetection
-        )
 
         // --------------------------------------------------------
         // 8. 최종 자세 지표
@@ -818,9 +961,7 @@ class MainActivity :
                  * 사용자 기준 오차로 바꾼다.
                  */
                 val calibratedBowError =
-                    calculateCalibratedBowError(
-                        metrics.bowArmStraightnessErrorDegree
-                    )
+                    metrics.bowArmStraightnessErrorDegree
 
                 TrackedPose(
 
@@ -943,10 +1084,6 @@ class MainActivity :
                      * 새로운 사용자이므로
                      * 보정값 초기화.
                      */
-                    bowCalibrationSamples.clear()
-
-                    bowArmBaselineError =
-                        null
 
                     poseTracker.beginSideTransitionMode()
 
@@ -973,8 +1110,7 @@ class MainActivity :
                      * 마지막 1.5초 동안 모은 값으로
                      * 활팔 기준값 확정.
                      */
-                    finalizeBowCalibration()
-
+                    correctPostureStartTime = 0L
                     measurementPhase =
                         MeasurementPhase.SIDE_MEASURING
 
@@ -1004,207 +1140,10 @@ class MainActivity :
     // Bow Arm Calibration
     // ============================================================
 
-    private fun collectBowCalibrationSample(
-        trackingState: TrackingState,
-        detection: RawPersonDetection?
-    ) {
 
-        if (
-            measurementPhase !=
-            MeasurementPhase.TURNING
-        ) {
-            return
-        }
 
-        if (
-            trackingState !=
-            TrackingState.LOCKED
-        ) {
-            return
-        }
 
-        if (
-            detection ==
-            null
-        ) {
-            return
-        }
 
-        val now =
-            SystemClock.elapsedRealtime()
-
-        val elapsed =
-            now -
-                    turningStartTime
-
-        /*
-         * 마지막 1.5초 전까지는
-         * 사용자가 돌아서 자세를 만드는 시간.
-         */
-        val calibrationStart =
-            TURNING_DURATION_MS -
-                    BOW_CALIBRATION_WINDOW_MS
-
-        if (
-            elapsed <
-            calibrationStart
-        ) {
-            return
-        }
-
-        val metrics =
-            poseMetrics.calculate(
-                detection
-            )
-
-        val rawBowError =
-            metrics
-                .bowArmStraightnessErrorDegree
-                ?: return
-
-        /*
-         * 비정상적으로 큰 값은
-         * calibration에서 제외.
-         *
-         * 실제 우리가 기대하는
-         * 곧게 편 팔의 raw 값은
-         * 현재 테스트 기준 약 30° 부근.
-         */
-        if (
-            rawBowError !in
-            0f..90f
-        ) {
-            return
-        }
-
-        bowCalibrationSamples.add(
-            rawBowError
-        )
-
-        if (
-            bowCalibrationSamples.size >
-            MAX_BOW_CALIBRATION_SAMPLES
-        ) {
-
-            bowCalibrationSamples.removeAt(
-                0
-            )
-        }
-
-        Log.d(
-            TAG,
-            "BOW CALIBRATION SAMPLE: $rawBowError"
-        )
-    }
-
-    private fun finalizeBowCalibration() {
-
-        if (
-            bowCalibrationSamples.size <
-            MIN_BOW_CALIBRATION_SAMPLES
-        ) {
-
-            /*
-             * 충분히 못 모은 경우
-             * SIDE_MEASURING 첫 정상 프레임에서
-             * fallback으로 기준을 잡는다.
-             */
-            bowArmBaselineError =
-                null
-
-            Log.w(
-                TAG,
-                "BOW CALIBRATION: NOT ENOUGH SAMPLES (${bowCalibrationSamples.size})"
-            )
-
-            return
-        }
-
-        /*
-         * 평균보다 중앙값을 사용.
-         *
-         * YOLO가 한 프레임 튀더라도
-         * 기준값에 영향이 적다.
-         */
-        val sorted =
-            bowCalibrationSamples.sorted()
-
-        val middle =
-            sorted.size /
-                    2
-
-        bowArmBaselineError =
-            if (
-                sorted.size % 2 ==
-                0
-            ) {
-
-                (
-                        sorted[middle - 1] +
-                                sorted[middle]
-                        ) /
-                        2f
-
-            } else {
-
-                sorted[middle]
-            }
-
-        Log.d(
-            TAG,
-            "BOW CALIBRATION COMPLETE: baseline=$bowArmBaselineError, samples=${bowCalibrationSamples.size}"
-        )
-    }
-
-    private fun calculateCalibratedBowError(
-        rawBowError: Float?
-    ): Float? {
-
-        if (
-            rawBowError ==
-            null
-        ) {
-            return null
-        }
-
-        /*
-         * 준비 시간에서 기준값을 못 잡은 경우
-         * 측면 측정의 첫 정상 프레임을 fallback으로 사용.
-         */
-        if (
-            bowArmBaselineError ==
-            null
-        ) {
-
-            bowArmBaselineError =
-                rawBowError
-
-            Log.w(
-                TAG,
-                "BOW CALIBRATION FALLBACK: baseline=$rawBowError"
-            )
-
-            return 0f
-        }
-
-        /*
-         * 최종 활팔 오차
-         *
-         * 예:
-         *
-         * baseline = 30°
-         *
-         * 현재 31°
-         * → 1°
-         *
-         * 현재 110°
-         * → 80°
-         */
-        return abs(
-            rawBowError -
-                    bowArmBaselineError!!
-        )
-    }
 
     // ============================================================
     // Timer
@@ -1346,22 +1285,16 @@ class MainActivity :
             MeasurementPhase.TURNING -> {
 
                 if (
-                    result.measurementRemainingSeconds <=
-                    1
+                    result.measurementRemainingSeconds <= 1
                 ) {
-
-                    /*
-                     * 마지막 1초는 움직이지 않고
-                     * 실제 양궁 자세 유지.
-                     */
                     userStatusText.text =
-                        "양궁 자세를 유지해주세요. 활팔 기준 보정 중..."
-
+                        "측면 자세를 유지해주세요. 잠시 후 측정을 시작합니다."
                 } else {
-
                     userStatusText.text =
-                        "활을 들고 측면 양궁 자세를 취해주세요. ${result.measurementRemainingSeconds}"
+                        "측면 자세를 취해주세요. 측정 시작까지 ${result.measurementRemainingSeconds}초"
                 }
+
+                clearMetricUI()
 
                 clearMetricUI()
             }
@@ -1372,23 +1305,65 @@ class MainActivity :
 
             MeasurementPhase.SIDE_MEASURING -> {
 
-                if (
-                    result.pose !=
-                    null
-                ) {
+                val pose = result.pose
 
-                    userStatusText.text =
-                        "측면 자세 측정 중"
-
-                } else {
+                if (pose == null) {
+                    correctPostureStartTime = 0L
 
                     userStatusText.text =
                         "측면 자세를 유지해주세요."
+
+                    updateMetricUI(null)
+                    return
                 }
 
-                updateMetricUI(
-                    result.pose
-                )
+                val feedback =
+                    postureFeedbackEvaluator.evaluate(
+                        bodyLeanDegree = pose.bodyLeanDegree,
+                        bowArmStraightnessErrorDegree =
+                            pose.bowArmStraightnessErrorDegree
+                    )
+
+                val allCorrect =
+                    feedback.bodyStatus == PostureStatus.NORMAL &&
+                            feedback.bowArmStatus == PostureStatus.NORMAL
+
+                if (allCorrect) {
+
+                    if (correctPostureStartTime == 0L) {
+                        correctPostureStartTime =
+                            SystemClock.elapsedRealtime()
+                    }
+
+                    val elapsed =
+                        SystemClock.elapsedRealtime() -
+                                correctPostureStartTime
+
+                    val remainingSeconds =
+                        ((CORRECT_POSTURE_DURATION_MS - elapsed + 999) / 1000)
+                            .coerceAtLeast(0)
+
+                    if (remainingSeconds == 0L) {
+                        userStatusText.text =
+                            "측면 자세 측정 완료"
+
+                        updateMetricUI(pose)
+                        return
+                    }
+
+                    userStatusText.text =
+                        "좋은 자세입니다 · ${remainingSeconds}초 유지해주세요."
+
+                } else {
+
+                    // 하나라도 빨간색이면 5초부터 다시 시작
+                    correctPostureStartTime = 0L
+
+                    userStatusText.text =
+                        "상체와 활팔 자세를 정상으로 맞춰주세요."
+                }
+
+                updateMetricUI(pose)
             }
         }
 
@@ -1420,14 +1395,10 @@ class MainActivity :
         val bowError =
             pose.bowArmStraightnessErrorDegree
 
-        val drawError =
-            pose.drawArmAlignmentErrorDegree
-
         val feedback =
             postureFeedbackEvaluator.evaluate(
                 bodyLeanDegree = bodyLean,
-                bowArmStraightnessErrorDegree = bowError,
-                drawArmAlignmentErrorDegree = drawError
+                bowArmStraightnessErrorDegree = bowError
             )
 
         // Stage 진행 중일 때만 자세 데이터를 누적
@@ -1442,8 +1413,7 @@ class MainActivity :
             TAG,
             "POSTURE FEEDBACK | " +
                     "body=${feedback.bodyStatus}, " +
-                    "bow=${feedback.bowArmStatus}, " +
-                    "draw=${feedback.drawArmStatus}"
+                    "bow=${feedback.bowArmStatus}, "
         )
 
         val currentTime =
@@ -1461,14 +1431,8 @@ class MainActivity :
                 currentTime
             )
 
-        val drawWarningReady =
-            drawWarningTracker.update(
-                feedback.drawArmStatus,
-                currentTime
-            )
 
-//        if (stageManager.isStageActive) {
-
+        if (stageManager.isStageActive) {
             when {
                 bodyWarningReady -> {
                     postureTtsManager.speak(
@@ -1482,13 +1446,9 @@ class MainActivity :
                     )
                 }
 
-                drawWarningReady -> {
-                    postureTtsManager.speak(
-                        "오른쪽팔을 수평으로 유지해주세요."
-                    )
-                }
+
             }
-//        }
+        }
 
         bodyLeanText.text =
             if (bodyLean != null) {
@@ -1534,27 +1494,7 @@ class MainActivity :
                 "활팔 기준 오차: --"
             }
 
-        drawArmText.text =
-            if (drawError != null) {
 
-                val statusText =
-                    when (feedback.drawArmStatus) {
-                        PostureStatus.NORMAL -> "✓ 정상"
-                        PostureStatus.WARNING -> "! 주의"
-                        null -> ""
-                    }
-
-                String.format(
-                    Locale.US,
-                    "당김팔 정렬 오차: %.1f°  %s",
-                    drawError,
-                    statusText
-                )
-
-            } else {
-
-                "당김팔 정렬 오차: --"
-            }
 
         updateMetricCardColor(
             bodyLeanText,
@@ -1566,10 +1506,6 @@ class MainActivity :
             feedback.bowArmStatus
         )
 
-        updateMetricCardColor(
-            drawArmText,
-            feedback.drawArmStatus
-        )
     }
 
     private fun updateMetricCardColor(
@@ -1596,12 +1532,10 @@ class MainActivity :
         bowArmText.text =
             "활팔 기준 오차: --"
 
-        drawArmText.text =
-            "당김팔 정렬 오차: --"
+
 
         updateMetricCardColor(bodyLeanText, null)
         updateMetricCardColor(bowArmText, null)
-        updateMetricCardColor(drawArmText, null)
     }
 
     // ============================================================

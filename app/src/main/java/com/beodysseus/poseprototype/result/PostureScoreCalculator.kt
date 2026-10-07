@@ -3,7 +3,6 @@ package com.beodysseus.poseprototype.result
 data class PostureScore(
     val bodyScore: Int,
     val bowArmScore: Int,
-    val drawArmScore: Int,
     val overallScore: Int
 )
 
@@ -30,20 +29,13 @@ class PostureScoreCalculator {
                 data.totalFrames
             )
 
-        val drawArmScore =
-            calculatePercentage(
-                data.drawArmNormalFrames,
-                data.totalFrames
-            )
-
-        // 세 자세 항목의 평균을 Stage 종합 안정도로 사용
+        // 상체 + 활팔 두 자세 항목의 평균
         val overallScore =
-            (bodyScore + bowArmScore + drawArmScore) / 3
+            (bodyScore + bowArmScore) / 2
 
         return PostureScore(
             bodyScore = bodyScore,
             bowArmScore = bowArmScore,
-            drawArmScore = drawArmScore,
             overallScore = overallScore
         )
     }

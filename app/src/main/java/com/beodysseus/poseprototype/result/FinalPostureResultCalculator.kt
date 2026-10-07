@@ -4,7 +4,6 @@ data class FinalPostureResult(
     val overallScore: Int,
     val bodyScore: Int,
     val bowArmScore: Int,
-    val drawArmScore: Int,
     val stage1Score: Int?,
     val stage2Score: Int?,
     val stage3Score: Int?
@@ -56,11 +55,6 @@ class FinalPostureResultCalculator {
                 it.bowArmNormalFrames
             }
 
-        val drawArmNormalFrames =
-            validStages.sumOf {
-                it.drawArmNormalFrames
-            }
-
         val bodyScore =
             calculatePercentage(
                 bodyNormalFrames,
@@ -73,18 +67,12 @@ class FinalPostureResultCalculator {
                 totalFrames
             )
 
-        val drawArmScore =
-            calculatePercentage(
-                drawArmNormalFrames,
-                totalFrames
-            )
-
+        // 상체 + 활팔 두 항목의 평균
         val overallScore =
             (
                     bodyScore +
-                            bowArmScore +
-                            drawArmScore
-                    ) / 3
+                            bowArmScore
+                    ) / 2
 
         val scoreCalculator =
             PostureScoreCalculator()
@@ -93,7 +81,6 @@ class FinalPostureResultCalculator {
             overallScore = overallScore,
             bodyScore = bodyScore,
             bowArmScore = bowArmScore,
-            drawArmScore = drawArmScore,
 
             stage1Score =
                 scoreCalculator

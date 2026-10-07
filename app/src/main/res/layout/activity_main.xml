@@ -127,17 +127,7 @@
             android:textColor="#FFFFFF"
             android:textSize="17sp" />
 
-        <!-- 당김팔 -->
-        <TextView
-            android:id="@+id/drawArmText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:background="#263244"
-            android:padding="16dp"
-            android:text="당김팔 정렬 오차: --"
-            android:textColor="#FFFFFF"
-            android:textSize="17sp" />
+
 
         <Button
             android:id="@+id/retryUserButton"

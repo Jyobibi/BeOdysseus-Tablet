@@ -5,8 +5,8 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 
 class UdpReceiver(
-    private val port: Int = NetworkConstants.UDP_PORT,
-    private val onMessageReceived: (String) -> Unit
+    private val port: Int = NetworkConstants.TABLET_PORT,
+    private val onMessageReceived: (String, String) -> Unit
 ) {
 
     companion object {
@@ -32,32 +32,41 @@ class UdpReceiver(
             try {
                 socket = DatagramSocket(port)
 
-                val buffer = ByteArray(1024)
+                Log.d(
+                    TAG,
+                    "UDP LISTENING ON PORT $port"
+                )
+
+                val buffer = ByteArray(4096)
 
                 while (isRunning) {
 
-                    val packet =
-                        DatagramPacket(
-                            buffer,
-                            buffer.size
-                        )
+                    val packet = DatagramPacket(
+                        buffer,
+                        buffer.size
+                    )
 
                     socket?.receive(packet)
 
-                    val message =
-                        String(
-                            packet.data,
-                            packet.offset,
-                            packet.length,
-                            Charsets.UTF_8
-                        )
+                    val message = String(
+                        packet.data,
+                        packet.offset,
+                        packet.length,
+                        Charsets.UTF_8
+                    )
+
+                    val senderIp =
+                        packet.address.hostAddress ?: continue
 
                     Log.d(
                         TAG,
-                        "UDP RECEIVED: $message"
+                        "UDP RECEIVED ← $senderIp : $message"
                     )
 
-                    onMessageReceived(message)
+                    onMessageReceived(
+                        message,
+                        senderIp
+                    )
                 }
 
             } catch (e: Exception) {

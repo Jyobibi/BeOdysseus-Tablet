@@ -148,15 +148,7 @@
                     android:textSize="18sp"
                     android:textStyle="bold" />
 
-                <TextView
-                    android:id="@+id/drawArmScoreText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="18dp"
-                    android:text="• 양팔 정렬                 --"
-                    android:textColor="#334155"
-                    android:textSize="18sp"
-                    android:textStyle="bold" />
+
 
             </LinearLayout>
 

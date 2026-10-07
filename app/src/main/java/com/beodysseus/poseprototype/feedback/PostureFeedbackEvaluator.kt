@@ -7,8 +7,7 @@ enum class PostureStatus {
 
 data class PostureFeedbackResult(
     val bodyStatus: PostureStatus?,
-    val bowArmStatus: PostureStatus?,
-    val drawArmStatus: PostureStatus?
+    val bowArmStatus: PostureStatus?
 )
 
 class PostureFeedbackEvaluator {
@@ -16,14 +15,14 @@ class PostureFeedbackEvaluator {
     companion object {
         // 임시 기준값 - 실제 측정 후 조정
         private const val BODY_LEAN_THRESHOLD = 10f
-        private const val BOW_ARM_THRESHOLD = 10f
-        private const val DRAW_ARM_THRESHOLD = 15f
+
+        // 긴팔 착용 시 키포인트 오차를 고려해 기준 완화
+        private const val BOW_ARM_THRESHOLD = 20f
     }
 
     fun evaluate(
         bodyLeanDegree: Float?,
-        bowArmStraightnessErrorDegree: Float?,
-        drawArmAlignmentErrorDegree: Float?
+        bowArmStraightnessErrorDegree: Float?
     ): PostureFeedbackResult {
 
         return PostureFeedbackResult(
@@ -34,10 +33,6 @@ class PostureFeedbackEvaluator {
             bowArmStatus = evaluateValue(
                 bowArmStraightnessErrorDegree,
                 BOW_ARM_THRESHOLD
-            ),
-            drawArmStatus = evaluateValue(
-                drawArmAlignmentErrorDegree,
-                DRAW_ARM_THRESHOLD
             )
         )
     }
